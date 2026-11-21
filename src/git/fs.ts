@@ -17,6 +17,8 @@ export interface Fs {
   append(path: string, data: Uint8Array): Promise<void>;
   /** Removes a file. Nothing happens if there is none. */
   remove(path: string): Promise<void>;
+  /** Gives a file another name. The folders above the new name exist. */
+  rename(from: string, to: string): Promise<void>;
   /** Size and time of a file, or null if there is none or it is a folder. */
   stat(path: string): Promise<FileStat | null>;
   /** The names in a folder. Empty if there is no such folder. */

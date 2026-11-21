@@ -37,6 +37,10 @@ export class NodeFs implements Fs {
     await fsp.rm(this.abs(p), { force: true });
   }
 
+  async rename(from: string, to: string): Promise<void> {
+    await fsp.rename(this.abs(from), this.abs(to));
+  }
+
   async stat(p: string): Promise<FileStat | null> {
     try {
       const st = await fsp.stat(this.abs(p));

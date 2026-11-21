@@ -241,13 +241,13 @@ describe("sync", () => {
     const w = setup({ "huge.bin": Buffer.alloc(50_000, 7) });
     const fs = new NodeFs(w.phoneDir);
     const result = await w.syncPhone({
-      largeBlob: async (oid, file, size) => {
-        // A host would be asked for ranges of bytes. Here the file is written in pieces.
-        const data = Buffer.from(server.git(path.basename(w.url), "cat-file", "blob", oid), "utf8");
-        assert.equal(size, 50_000);
-        await fs.remove(file);
-        for (let at = 0; at < size; at += 16_000) {
-          await fs.append(file, Buffer.alloc(Math.min(16_000, size - at), data[0]));
+      largeBlob: async (file, to) => {
+        // A host would be asked for ranges of bytes of the file at that commit. Here it is written in pieces.
+        assert.equal(file.size, 50_000);
+        assert.equal(server.git(path.basename(w.url), "rev-parse", `${file.commit}:${file.path}`), file.oid);
+        await fs.remove(to);
+        for (let at = 0; at < file.size; at += 16_000) {
+          await fs.append(to, Buffer.alloc(Math.min(16_000, file.size - at), 7));
         }
         return true;
       },

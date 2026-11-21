@@ -19,6 +19,15 @@ import { parsePack, writePack } from "./pack.ts";
 import { fetchPack, lsRefs, push, type Remote, ZERO_OID } from "./protocol.ts";
 import { ObjectStore } from "./store.ts";
 
+/** A file of the remote that is too large to come in one response. */
+export interface LargeFile {
+  oid: string;
+  size: number;
+  /** A commit that holds the file, and the path of the file there */
+  commit: string;
+  path: string;
+}
+
 /** A file of a commit: what it holds, and what kind of thing it is. */
 export interface Entry {
   oid: string;
@@ -44,8 +53,8 @@ export interface SyncOptions {
   batchBytes: number;
   /** The sizes of the files under a tree, by their ids, if the host can tell */
   sizes?: (treeOid: string) => Promise<Map<string, number>>;
-  /** Gets a file that is too large for one response and writes it to `path`. False if it cannot. */
-  largeBlob?: (oid: string, path: string, size: number) => Promise<boolean>;
+  /** Gets a file that is too large for one response and writes it to `path` in the vault. False if it cannot. */
+  largeBlob?: (file: LargeFile, path: string) => Promise<boolean>;
   now?: () => Date;
   log?: (message: string) => void;
 }
@@ -373,7 +382,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   const absent = new Set(Object.keys(state.absent));
   /** The tree of the commit that this sync leaves on the remote */
   const target = new Map(there);
-  const downloads: { path: string; entry: Entry }[] = [];
+  /** `from` is where the remote has the content, when that is not `path` */
+  const downloads: { path: string; entry: Entry; from?: string }[] = [];
+  /** The commit that `there` was read from */
+  const thereCommit = tip;
   const uploads: string[] = [];
   const removeHere: string[] = [];
   const paths = new Set([...base.keys(), ...here.keys(), ...there.keys()]);
@@ -412,7 +424,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     } else {
       const copy = conflictPath(path, now, (p) => paths.has(p) || target.has(p));
       target.set(copy, t);
-      downloads.push({ path: copy, entry: t });
+      downloads.push({ path: copy, entry: t, from: path });
       uploads.push(path);
       result.conflicts.push({ path, copy });
     }
@@ -559,7 +571,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           absent.delete(path);
         }
       };
-      for (const { path, entry } of downloads) {
+      for (const { path, entry, from } of downloads) {
         if (!isFile(entry)) {
           // A link or a repository inside the repository: tracked, but not made in the vault
           settle(path, entry, true);
@@ -571,7 +583,8 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         }
         const size = sizes.get(entry.oid);
         if (size !== undefined && size > options.maxFileBytes) {
-          if (options.largeBlob !== undefined && (await options.largeBlob(entry.oid, path, size))) {
+          const file = { oid: entry.oid, size, commit: thereCommit!, path: from ?? path };
+          if (options.largeBlob !== undefined && (await options.largeBlob(file, path))) {
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);
