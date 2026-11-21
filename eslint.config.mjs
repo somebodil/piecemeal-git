@@ -19,6 +19,8 @@ export default defineConfig([
     rules: {
       "obsidianmd/no-nodejs-modules": "off",
       "no-restricted-globals": "off",
+      "obsidianmd/rule-custom-message": "off",
+      "obsidianmd/prefer-window-timers": "off",
     },
   },
   {

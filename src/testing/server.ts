@@ -25,6 +25,8 @@ export class TestServer {
     return execFileSync("git", args, {
       cwd: path.join(this.root, dir),
       encoding: "utf8",
+      // What git says beside its result is kept for the message of an error, not printed
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         GIT_CONFIG_GLOBAL: "/dev/null",

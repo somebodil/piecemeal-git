@@ -16,7 +16,7 @@ export interface GitHubRepo {
 /** The owner and the name in an address of github.com, or null for another host. */
 export function parseGitHub(url: string): GitHubRepo | null {
   const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/*$/.exec(url);
-  return match === null ? null : { owner: match[1]!, repo: match[2]! };
+  return match === null ? null : { owner: match[1], repo: match[2] };
 }
 
 function headers(token: string | undefined, extra: Record<string, string>): Record<string, string> {

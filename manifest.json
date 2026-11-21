@@ -1,0 +1,10 @@
+{
+  "id": "piecemeal-git",
+  "name": "Piecemeal Git",
+  "version": "0.1.0",
+  "minAppVersion": "1.12.3",
+  "description": "Sync a vault with a git repository in small pieces, so that it works on a phone. No git program needed.",
+  "author": "somebodil",
+  "authorUrl": "https://github.com/somebodil",
+  "isDesktopOnly": false
+}
