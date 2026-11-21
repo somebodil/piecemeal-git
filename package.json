@@ -1,0 +1,30 @@
+{
+  "name": "piecemeal-git",
+  "version": "0.1.0",
+  "description": "Obsidian plugin that syncs a vault with a git repository in small pieces, so that it works on a phone",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "dependencies": {
+    "ignore": "7.0.5",
+    "pako": "2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/pako": "2.0.4",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.6.0",
+    "obsidian": "1.14.4",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.73.0"
+  }
+}
