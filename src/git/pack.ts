@@ -47,7 +47,7 @@ export async function parsePack(
   let pos = 12;
   for (let i = 0; i < count; i++) {
     const offset = pos;
-    let byte = pack[pos++]!;
+    let byte = pack[pos++];
     const type = (byte >> 4) & 7;
     let size = byte & 15;
     let scale = 16;
@@ -114,7 +114,7 @@ export async function parsePack(
         base = found;
         break;
       } else {
-        const whole = { type: TYPE_OF[entry.type]!, data: entry.data };
+        const whole = { type: TYPE_OF[entry.type], data: entry.data };
         await finish(entry, whole);
         base = whole;
         break;
@@ -164,17 +164,17 @@ function applyDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
   const out = new Uint8Array(readSize());
   let at = 0;
   while (pos < delta.length) {
-    const command = delta[pos++]!;
+    const command = delta[pos++];
     if (command & 0x80) {
       let offset = 0;
       let size = 0;
       if (command & 0x01) offset = delta[pos++]!;
-      if (command & 0x02) offset += delta[pos++]! * 0x100;
-      if (command & 0x04) offset += delta[pos++]! * 0x10000;
-      if (command & 0x08) offset += delta[pos++]! * 0x1000000;
+      if (command & 0x02) offset += delta[pos++] * 0x100;
+      if (command & 0x04) offset += delta[pos++] * 0x10000;
+      if (command & 0x08) offset += delta[pos++] * 0x1000000;
       if (command & 0x10) size = delta[pos++]!;
-      if (command & 0x20) size += delta[pos++]! * 0x100;
-      if (command & 0x40) size += delta[pos++]! * 0x10000;
+      if (command & 0x20) size += delta[pos++] * 0x100;
+      if (command & 0x40) size += delta[pos++] * 0x10000;
       if (size === 0) size = 0x10000;
       out.set(base.subarray(offset, offset + size), at);
       at += size;

@@ -45,7 +45,7 @@ export function fromHex(hex: string): Uint8Array {
 export function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) {
-    const d = a[i]! - b[i]!;
+    const d = a[i] - b[i];
     if (d !== 0) {
       return d;
     }
