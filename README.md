@@ -16,6 +16,7 @@ Try it on a copy of a vault first. It has run on an emulated phone and not yet o
 
 ## What it sends, and where
 
+- It needs a repository on a git host that it can reach over HTTPS, such as GitHub. With most hosts that means an account there, and a token of it. The plugin itself wants no account and no payment.
 - It talks to the server of the repository that you name, and to nothing else, with one exception.
 - For a repository on github.com it also asks `api.github.com` for the sizes of the files and for the parts of files that are too large for one answer. It sends the token there too, since a private repository answers to nothing else.
 - The token is kept in the secret storage of Obsidian. It is not written into the vault and not into the settings of the plugin.
@@ -142,3 +143,5 @@ npm run build   # type check, then the main.js of a release
 ## License
 
 [MIT](LICENSE)
+
+The `main.js` of a release includes [pako](https://github.com/nodeca/pako), which reads and writes what git keeps compressed. It is under the MIT license and the Zlib license.
