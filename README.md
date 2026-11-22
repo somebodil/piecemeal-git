@@ -134,7 +134,7 @@ npm run check   # type check, lint, and tests
 npm run build   # type check, then the main.js of a release
 ```
 
-A release is made by a tag with the version of `manifest.json` as its name. GitHub then checks and builds the plugin, attests that `main.js`, `manifest.json` and `styles.css` were built there from this source, and puts them into the release.
+A release is made by a tag with the version of `manifest.json` as its name. GitHub then checks and builds the plugin, attests that `main.js`, `manifest.json` and `styles.css` were built there from this source, and puts them into the release. The directory of Obsidian finds a new release by itself in time, and at once when "Check for new releases" is pressed on the page of the plugin at community.obsidian.md. It then reviews the release, and warns about the files in `testing` as if they were parts of the plugin.
 
 - `src/git` holds the git protocol, the objects, and the sync. It knows nothing about Obsidian, so its tests run with plain Node.js against a git server on the same machine.
 - `src/platform` holds how the plugin reads and writes files and talks to a server inside Obsidian.
