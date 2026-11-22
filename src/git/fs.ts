@@ -25,8 +25,19 @@ export interface Fs {
   stat(path: string): Promise<FileStat | null>;
   /** True if there is a folder with this path. */
   isDir(path: string): Promise<boolean>;
-  /** The names in a folder, spelled as the folder has them. Empty if there is no such folder. */
+  /**
+   * The names in a folder, spelled as the folder has them. Empty if there is
+   * no such folder. Where `readLink` is there, a link is among the files,
+   * whatever it points to.
+   */
   list(dir: string): Promise<{ files: string[]; dirs: string[] }>;
+  /**
+   * Where a link points, or null if the path is not a link. Only on files
+   * that can hold links and tell them from files: a phone cannot.
+   */
+  readLink?(path: string): Promise<string | null>;
+  /** Makes a link, in place of a file or a link that has the name. Only where `readLink` is. */
+  writeLink?(path: string, target: string): Promise<void>;
 }
 
 export function join(dir: string, name: string): string {

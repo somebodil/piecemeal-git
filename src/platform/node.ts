@@ -25,7 +25,26 @@ export class NodeFs implements Fs {
 
   async write(p: string, data: Uint8Array): Promise<void> {
     await fsp.mkdir(path.dirname(this.abs(p)), { recursive: true });
+    // Written through a link, the content would land where the link points
+    if ((await this.readLink(p)) !== null) {
+      await fsp.rm(this.abs(p));
+    }
     await fsp.writeFile(this.abs(p), data);
+  }
+
+  async readLink(p: string): Promise<string | null> {
+    try {
+      return await fsp.readlink(this.abs(p));
+    } catch {
+      return null;
+    }
+  }
+
+  async writeLink(p: string, target: string): Promise<void> {
+    await fsp.mkdir(path.dirname(this.abs(p)), { recursive: true });
+    // A folder with the name stays, and makes this fail
+    await fsp.rm(this.abs(p), { force: true });
+    await fsp.symlink(target, this.abs(p));
   }
 
   async append(p: string, data: Uint8Array): Promise<void> {
@@ -51,8 +70,9 @@ export class NodeFs implements Fs {
 
   async stat(p: string): Promise<FileStat | null> {
     try {
-      const st = await fsp.stat(this.abs(p));
-      return st.isFile() ? { size: st.size, mtime: Math.floor(st.mtimeMs) } : null;
+      // A link is a file of its own, whatever it points to
+      const st = await fsp.lstat(this.abs(p));
+      return st.isFile() || st.isSymbolicLink() ? { size: st.size, mtime: Math.floor(st.mtimeMs) } : null;
     } catch {
       return null;
     }
@@ -60,7 +80,7 @@ export class NodeFs implements Fs {
 
   async isDir(p: string): Promise<boolean> {
     try {
-      return (await fsp.stat(this.abs(p))).isDirectory();
+      return (await fsp.lstat(this.abs(p))).isDirectory();
     } catch {
       return false;
     }
@@ -77,7 +97,7 @@ export class NodeFs implements Fs {
     for (const entry of entries) {
       if (entry.isDirectory()) {
         out.dirs.push(entry.name);
-      } else if (entry.isFile()) {
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
         out.files.push(entry.name);
       }
     }

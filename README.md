@@ -38,6 +38,7 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
 - A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
 - An iPhone, an iPad and a Mac keep a name like `한글.md` or `é.md` with each letter taken apart into its parts, whatever the name was written as, and git keeps a name as it is given. On those devices a file of the vault has the name that the repository has for it, and a new file is sent with the letters of its name in one piece, as git does on a Mac. So a name does not change in the repository by going through such a device.
+- A link of the repository is a file in the vault that holds where the link points. This is how git keeps a link where links cannot be made, as on a phone. It stays a link in the repository, also when you write another place into it. From a terminal the sync makes real links, and sends a link as a link, without going into a folder that it points to.
 - A file that was left out of the vault is looked at again by every sync, and comes when what kept it out is gone: the other file of its name was removed or renamed, or the limit was raised above its size. As long as it stays out, a sync asks the repository nothing about it and tells you nothing more.
 
 Files that are too large:
@@ -76,7 +77,8 @@ Try it on a copy of a vault first.
 
 - It has not run on a real phone or tablet, and not on iOS. Inside Obsidian on a Mac it has not run either.
 - A device that keeps the letters of a name apart cannot hold two files whose names differ in this only. The second one is left out of the vault, like one that differs in capital letters only.
-- Links and repositories inside the repository are left alone: they stay in the repository and are not made in the vault.
+- Inside Obsidian on a computer a link is not made as a link either, though it could be there. A link that you make in such a vault yourself is followed: what it points to is sent as files of the vault.
+- A repository inside the repository is left alone, as git leaves it unless it is told otherwise: it stays in the repository and is not made in the vault.
 - A file above the limit that is changed twice in the same moment, to the same size, is not seen as changed. It is too large to read again.
 - GitLab and Codeberg do not answer when git asks for sizes, and have no way that the plugin knows to give a part of a file. So there a batch can be larger than meant, and a file above the limit comes whole.
 

@@ -56,13 +56,14 @@ export class TestServer {
   /**
    * Commits changes straight into the main branch of a repository of the
    * server, with no files on a disk in between: a path with content is
-   * written, and a path with null is removed.
+   * written, one with `{ link }` becomes a link to there, and a path with
+   * null is removed.
    *
    * This plays a computer that tells "a.md" from "A.md". The disk of most
    * computers does not, so a clone there can neither hold both names nor
    * show git that a name changed its capital letters.
    */
-  commit(name: string, changes: Record<string, string | Buffer | null>, message: string): void {
+  commit(name: string, changes: Record<string, string | Buffer | { link: string } | null>, message: string): void {
     const dir = `${name}.git`;
     const index = path.join(this.root, `${name}.index`);
     rmSync(index, { force: true });
@@ -80,6 +81,9 @@ export class TestServer {
       if (content === null) {
         // A line with mode 0 takes the path out, and unlike --remove needs no files on a disk
         git(["update-index", "--index-info"], `0 ${"0".repeat(40)}\t${file}\n`);
+      } else if (typeof content === "object" && "link" in content) {
+        const oid = git(["hash-object", "-w", "--stdin"], content.link);
+        git(["update-index", "--add", "--cacheinfo", `120000,${oid},${file}`]);
       } else {
         const oid = git(["hash-object", "-w", "--stdin"], content);
         git(["update-index", "--add", "--cacheinfo", `100644,${oid},${file}`]);

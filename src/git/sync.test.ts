@@ -1,5 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
@@ -47,7 +62,7 @@ describe("sync", () => {
         server.git(pc, "push", "-q", "origin", "HEAD:main");
       },
       /** Commits changes on the remote as a computer would that tells capital letters apart. Null removes a file. */
-      commitThere(changes: Record<string, string | Buffer | null>, message = "from another computer"): void {
+      commitThere(changes: Record<string, string | Buffer | { link: string } | null>, message = "from another computer"): void {
         server.commit(name, changes, message);
       },
       pullPc(): void {
@@ -677,6 +692,89 @@ describe("sync", () => {
   });
 
   // A phone and most computers take "a.md" and "A.md" for one file. Git does not.
+  describe("with links", () => {
+    /** What kind of thing the branch has at a path, and what it holds. */
+    const there = (w: { url: string }, file: string): [string, string] => [
+      server.git(path.basename(w.url), "ls-tree", "main", "--", file).split(/\s/)[0],
+      server.git(path.basename(w.url), "cat-file", "blob", `main:${file}`),
+    ];
+
+    it("makes a link where the remote has one, and sends a link as one", async () => {
+      const w = setup({ "note.md": "note\n" });
+      w.commitThere({ "to note": { link: "note.md" }, "dir/up": { link: "../note.md" } });
+      const result = await w.syncPhone();
+      assert.deepEqual(result.downloaded.sort(), ["dir/up", "note.md", "to note"]);
+      assert.equal(readlinkSync(path.join(w.phoneDir, "to note")), "note.md");
+      assert.equal(readlinkSync(path.join(w.phoneDir, "dir/up")), "../note.md");
+      assert.equal(w.readPhone("dir/up"), "note\n");
+      const again = await w.syncPhone();
+      assert.deepEqual([again.downloaded, again.uploaded], [[], []]);
+
+      // The phone points a link at a folder, makes a new one, and puts a file where one was
+      unlinkSync(path.join(w.phoneDir, "to note"));
+      symlinkSync("dir", path.join(w.phoneDir, "to note"));
+      symlinkSync("note.md", path.join(w.phoneDir, "new link"));
+      unlinkSync(path.join(w.phoneDir, "dir/up"));
+      w.writePhone("dir/up", "a file now\n");
+      const sent = await w.syncPhone();
+      assert.deepEqual(sent.uploaded.sort(), ["dir/up", "new link", "to note"]);
+      assert.deepEqual(there(w, "to note"), ["120000", "dir"]);
+      assert.deepEqual(there(w, "new link"), ["120000", "note.md"]);
+      assert.deepEqual(there(w, "dir/up"), ["100644", "a file now"]);
+      // The folder that the link points at was not gone into
+      assert.deepEqual(w.pathsThere(), ["dir/up", "new link", "note.md", "to note"]);
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+
+      // The remote makes a file of a link, and a link of a file
+      w.commitThere({ "new link": "a file\n", "note.md": { link: "dir/up" } });
+      const taken = await w.syncPhone();
+      assert.deepEqual(taken.downloaded.sort(), ["new link", "note.md"]);
+      assert.equal(lstatSync(path.join(w.phoneDir, "new link")).isFile(), true);
+      assert.equal(w.readPhone("new link"), "a file\n");
+      assert.equal(readlinkSync(path.join(w.phoneDir, "note.md")), "dir/up");
+      const last = await w.syncPhone();
+      assert.deepEqual([last.downloaded, last.uploaded], [[], []]);
+    });
+
+    it("keeps a link as a file that holds where it points, where links cannot be made", async () => {
+      const w = setup({ "note.md": "note\n" });
+      w.commitThere({ "to note": { link: "note.md" } });
+      // A phone: its files are files, and it has no word for a link
+      const phone: Partial<SyncOptions> = { fs: new CaseBlindFs(new NodeFs(w.phoneDir)) };
+      const result = await w.syncPhone(phone);
+      assert.deepEqual(result.downloaded.sort(), ["note.md", "to note"]);
+      assert.equal(lstatSync(path.join(w.phoneDir, "to note")).isFile(), true);
+      assert.equal(w.readPhone("to note"), "note.md");
+      const again = await w.syncPhone(phone);
+      assert.deepEqual([again.downloaded, again.uploaded], [[], []]);
+
+      // Written anew there, it is still a link on the remote
+      w.writePhone("to note", "other.md");
+      w.writePhone("plain.md", "plain\n");
+      const sent = await w.syncPhone(phone);
+      assert.deepEqual(sent.uploaded.sort(), ["plain.md", "to note"]);
+      assert.deepEqual(there(w, "to note"), ["120000", "other.md"]);
+      assert.deepEqual(there(w, "plain.md"), ["100644", "plain"]);
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    });
+
+    it("takes a link that an earlier version left out of the vault", async () => {
+      const w = setup({ "note.md": "note\n" });
+      w.commitThere({ "to note": { link: "note.md" } });
+      await w.syncPhone();
+      // As an earlier version left it: tracked, and not in the vault
+      unlinkSync(path.join(w.phoneDir, "to note"));
+      const statePath = path.join(w.phoneDir, ".piecemeal/state.json");
+      const state = JSON.parse(readFileSync(statePath, "utf8")) as { absent: Record<string, true>; stat: Record<string, unknown> };
+      state.absent["to note"] = true;
+      delete state.stat["to note"];
+      writeFileSync(statePath, JSON.stringify(state));
+      const result = await w.syncPhone();
+      assert.deepEqual([result.downloaded, result.deletedThere], [["to note"], []]);
+      assert.equal(readlinkSync(path.join(w.phoneDir, "to note")), "note.md");
+    });
+  });
+
   describe("in a vault that does not tell capital letters from small ones", () => {
     const blind = (w: { phoneDir: string }): Partial<SyncOptions> => ({ fs: new CaseBlindFs(new NodeFs(w.phoneDir)) });
     const names = (dir: string): string[] => readdirSync(dir).filter((name) => name !== ".piecemeal").sort();

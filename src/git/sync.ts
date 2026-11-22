@@ -7,6 +7,7 @@ import {
   type GitObject,
   MODE_EXECUTABLE,
   MODE_FILE,
+  MODE_LINK,
   MODE_TREE,
   objectId,
   parseCommit,
@@ -144,6 +145,14 @@ function same(a: Entry | undefined, b: Entry | undefined): boolean {
 
 function isFile(entry: Entry): boolean {
   return entry.mode === MODE_FILE || entry.mode === MODE_EXECUTABLE;
+}
+
+/**
+ * True for what a vault can hold: a file, or a link. A repository inside the
+ * repository is not made in the vault, as git does not get one unless told to.
+ */
+function inVault(entry: Entry): boolean {
+  return isFile(entry) || entry.mode === MODE_LINK;
 }
 
 /** The folder of a path, which is "" for a path at the top. */
@@ -370,6 +379,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     return false;
   };
 
+  /** Where a link points, as the repository keeps it, or null for what is not a link or cannot be told from a file. */
+  const linkAt = async (path: string): Promise<Uint8Array | null> => {
+    const target = (await fs.readLink?.(path)) ?? null;
+    return target === null ? null : encode(target);
+  };
+
   // --- What was agreed on last time -----------------------------------------
   let state: State = { version: 1, url: remote.url, branch: "", commit: null, tree: {}, stat: {}, absent: {} };
   const saved = await fs.read(statePath);
@@ -548,19 +563,28 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         result.tooLargeChanged.push(path);
         continue;
       } else {
-        const data = await fs.read(path);
+        const target = await linkAt(path);
+        const data = target ?? (await fs.read(path));
         if (data === null) {
           continue;
         }
         const oid = await objectId({ type: "blob", data });
-        here.set(path, { oid, mode: agreed !== undefined && isFile(agreed) ? agreed.mode : MODE_FILE });
+        let mode = MODE_FILE;
+        if (target !== null) {
+          mode = MODE_LINK;
+        } else if (agreed !== undefined && (isFile(agreed) || (agreed.mode === MODE_LINK && fs.readLink === undefined))) {
+          // Whether a file may be run is not known here, so it stays as the repository has it.
+          // So does a link where links cannot be made: it is a file there that holds where it points.
+          mode = agreed.mode;
+        }
+        here.set(path, { oid, mode });
       }
       stats.set(path, stat);
       seenAs.set(path, here.get(path)!.oid);
     }
     // What is tracked but not in the vault on purpose counts as unchanged
     for (const [path, entry] of base) {
-      if (!here.has(path) && (state.absent[path] === true || !isFile(entry))) {
+      if (!here.has(path) && (state.absent[path] === true || !inVault(entry))) {
         here.set(path, entry);
       }
     }
@@ -620,7 +644,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         } else {
           downloads.push({ path, entry: t });
         }
-      } else if (t !== undefined && isFile(t) && absent.has(path) && !present.has(path)) {
+      } else if (t !== undefined && inVault(t) && absent.has(path) && !present.has(path)) {
         // Left out before. A file that was too large is asked for only if the limit lets it in now.
         const size = large.get(path);
         if (size === undefined || size <= options.maxFileBytes) {
@@ -838,7 +862,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       const sent: { path: string; entry: Entry; stat: FileStat }[] = [];
       for (const path of group) {
         const stat = await fs.stat(path);
-        const data = stat === null ? null : await fs.read(path);
+        const data = stat === null ? null : ((await linkAt(path)) ?? (await fs.read(path)));
         if (stat === null || data === null || data.length > options.maxFileBytes) {
           result.busy.push(path);
           continue;
@@ -998,8 +1022,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         return true;
       };
       for (const { path, entry, from } of downloads) {
-        if (!isFile(entry)) {
-          // A link or a repository inside the repository: tracked, but not made in the vault
+        if (!inVault(entry)) {
+          // A repository inside the repository: tracked, but not made in the vault
           settle(path, entry, true);
           continue;
         }
@@ -1078,7 +1102,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
               continue;
             }
             const written = await put(path, async () => {
-              await fs.write(path, data);
+              if (entry.mode === MODE_LINK && fs.writeLink !== undefined) {
+                await fs.writeLink(path, decode(data));
+              } else {
+                // Where links cannot be made, a link is a file that holds where it points, as git has it there
+                await fs.write(path, data);
+              }
               return true;
             });
             if (!written) {
