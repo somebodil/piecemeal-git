@@ -76,7 +76,7 @@ TOKEN=... node src/testing/try.ts https://github.com/you/vault.git /some/folder 
 
 For a phone to sync with a repository on your computer, with no host and no token in between, `node src/testing/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
 
-In Obsidian: build, then copy `main.js` and `manifest.json` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. Then run the command "Sync with the repository".
+In Obsidian: build, then copy `main.js`, `manifest.json` and `styles.css` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. "Check" in the settings asks the server for its branches and changes nothing, so you see that the address and the token are right. Then run the command "Sync with the repository", or press the icon of the ribbon.
 
 The token goes to the server as git sends it, as a password. GitHub and GitLab take it under any name. A host that wants the name of your account with it gets the name from the address: `https://name@host/you/vault.git`.
 
@@ -86,9 +86,21 @@ The files that Obsidian keeps for one device, `workspace.json` and `workspace-mo
 
 Try it on a copy of a vault first.
 
+## What you see
+
+- While a sync runs, a notice says how far it is, and the icon of the ribbon turns. The desktop app also says it in the bar at the bottom, and there it says afterwards how long ago the last sync was.
+- A sync that went well says in a line what it took and sent, and the line goes away by itself. One that left something to look at stays until you close it, and has a button that shows the files. The icon then has a dot.
+- "Show what the last sync did" lists the files of the last sync by what was done with them, and a file opens when you press its name.
+- The same list shows every file of the vault that has a copy from the other side beside it, with two buttons: "Keep mine" removes the copy, and "Take the other" puts the copy in the place of your file. The next sync sends what you chose.
+- Before the first sync of a vault that holds files with a repository that holds files, and before a sync that removes ten files or more that are a quarter of all, a dialog says what is about to happen and waits for you. A sync that started by itself does not do such a thing: it stops, and tells you to start one yourself.
+- A file that another device removed goes where Obsidian puts the files that you delete, as its settings say: its trash, the one of the system, or nowhere.
+- A sync that failed says what to do where that is known: give a token, look at the address, connect the device.
+
 ## Not done yet
 
 - It has not run on a real phone or tablet, and not on iOS. Inside Obsidian on a Mac it has not run either.
+- The dialogs, the notices and the settings were looked at on the emulated Android phone only. The bar at the bottom of the desktop app was not seen at all.
+- All that the plugin says is in English.
 - What came after the runs inside Obsidian on a computer and with a private repository on GitHub has not run there: texts that are put together, links, branches, the look at every write. It ran in the tests and on the emulated phone.
 - Files that a repository keeps with Git LFS come as the small files that stand for them, as they do for a git without LFS.
 - The server has to speak version 2 of the git protocol, which git has done since 2018, and name its objects with SHA-1.
@@ -111,7 +123,8 @@ npm run build   # type check, then the main.js of a release
 - `src/git` holds the git protocol, the objects, and the sync. It knows nothing about Obsidian, so its tests run with plain Node.js against a git server on the same machine.
 - `src/platform` holds what differs between Obsidian and Node.js: files and HTTP.
 - `src/testing` holds the git server of the tests, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
-- `src/main.ts` is the plugin: the settings, the command, and what it tells you after a sync.
+- `src/main.ts` is the plugin: the commands, the icon, and what it tells you while a sync runs and after it.
+- `src/ui` holds the settings, the two dialogs, and the words that the plugin says. `styles.css` is how they look.
 
 ## License
 

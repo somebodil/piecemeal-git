@@ -74,8 +74,45 @@ export interface SyncOptions {
   sizes?: (treeOid: string) => Promise<Map<string, number>>;
   /** Gets a file that is too large for one response and writes it to `path` in the vault. False if it cannot. */
   largeBlob?: (file: LargeFile, path: string) => Promise<boolean>;
+  /** Told how far the sync is, for a person who waits */
+  onProgress?: (progress: Progress) => void;
+  /**
+   * Asked before anything is changed on either side, with what the sync is
+   * about to do. False stops the sync there, with a `CancelledError`.
+   */
+  confirm?: (plan: Plan) => Promise<boolean>;
   now?: () => Date;
   log?: (message: string) => void;
+}
+
+/** How far a sync is: what it is at, and how many files of how many are done with. */
+export interface Progress {
+  step: "looking" | "sending" | "taking";
+  done: number;
+  total: number;
+}
+
+/** What a sync is about to do. */
+export interface Plan {
+  /** True if this vault and this remote have not been synced before */
+  first: boolean;
+  /** How many files had been agreed on */
+  tracked: number;
+  /** How many files come from the remote, and how many go there */
+  take: number;
+  send: number;
+  /** Files that the sync removes from the vault, and from the remote */
+  removeHere: string[];
+  removeThere: string[];
+  /** Files that both sides changed: put together where they are texts and it works out, else kept as two */
+  bothChanged: string[];
+}
+
+/** Thrown when the sync was stopped by what `confirm` said. Nothing was changed. */
+export class CancelledError extends Error {
+  constructor() {
+    super("The sync was stopped before it changed anything.");
+  }
 }
 
 export interface SyncResult {
@@ -256,10 +293,23 @@ function conflictPath(path: string, when: Date, taken: (path: string) => boolean
 export async function sync(options: SyncOptions): Promise<SyncResult> {
   /** What an attempt did before the remote refused the rest */
   const done = { uploaded: [] as string[], tooLargeIgnored: [] as string[] };
+  // Asked once, and not again when the sync starts over
+  let confirmed = false;
+  const { confirm } = options;
+  const asked: SyncOptions =
+    confirm === undefined
+      ? options
+      : {
+          ...options,
+          confirm: async (plan) => {
+            confirmed = confirmed || (await confirm(plan));
+            return confirmed;
+          },
+        };
   for (let attempt = 1; ; attempt++) {
     const result = emptyResult();
     try {
-      await attemptSync(options, result);
+      await attemptSync(asked, result);
     } catch (error) {
       // Another device sent something while this one was at it. What the remote
       // holds now is looked at again, and the sync goes on from there.
@@ -408,6 +458,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   }
 
   // --- What the remote holds now --------------------------------------------
+  const progress = options.onProgress ?? (() => undefined);
+  progress({ step: "looking", done: 0, total: 0 });
   const refs = await lsRefs(http, remote);
   const opensWith = refs.head?.slice("refs/heads/".length);
   // Without a branch that is asked for: the one of last time while the remote has it, and
@@ -692,8 +744,14 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       continue;
     }
     const b = base.get(path);
-    const h = here.get(path);
+    let h = here.get(path);
     const t = there.get(path);
+    if (b === undefined && h !== undefined && t !== undefined && h.oid === t.oid && h.mode === MODE_FILE) {
+      // A file that was never agreed on holds what the remote has, and the remote says more about it:
+      // that it may be run, or that it is a link. The device does not know such things. The remote is right.
+      h = t;
+      here.set(path, t);
+    }
     if (same(h, b)) {
       if (!same(t, b)) {
         if (t === undefined) {
@@ -733,6 +791,21 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       bothChanged.push({ path, b, h, t });
     } else {
       keepBoth(path, t);
+    }
+  }
+
+  if (options.confirm !== undefined) {
+    const plan: Plan = {
+      first: saved === null || state.commit === null,
+      tracked: base.size,
+      take: downloads.length,
+      send: uploads.length,
+      removeHere: removeHere.filter((path) => !absent.has(path)),
+      removeThere: [...result.deletedThere],
+      bothChanged: [...bothChanged.map((item) => item.path), ...result.conflicts.map((item) => item.path)],
+    };
+    if (!(await options.confirm(plan))) {
+      throw new CancelledError();
     }
   }
 
@@ -923,7 +996,10 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
 
     const who = signature(options.author.name, options.author.email, now);
+    let sentSoFar = 0;
     for (const group of groups) {
+      progress({ step: "sending", done: sentSoFar, total: uploads.length });
+      sentSoFar += group.length;
       const blobs: GitObject[] = [];
       const sent: { path: string; entry: Entry; stat: FileStat }[] = [];
       for (const path of group) {
@@ -1011,7 +1087,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         result.busy.push(path);
         continue;
       }
-      await fs.remove(path);
+      await (fs.discard === undefined ? fs.remove(path) : fs.discard(path));
       stats.delete(path);
       agreed.delete(path);
       absent.delete(path);
@@ -1116,8 +1192,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         settle(path, entry, true);
         return true;
       };
+      let taken = 0;
+      const tookOne = (): void => progress({ step: "taking", done: ++taken, total: downloads.length });
+      progress({ step: "taking", done: 0, total: downloads.length });
       for (const { path, entry, from } of downloads) {
         if (!inVault(entry)) {
+          tookOne();
           // A repository inside the repository: tracked, but not made in the vault
           settle(path, entry, true);
           continue;
@@ -1134,6 +1214,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           const file = { oid: entry.oid, size, commit: thereCommit!, path: from ?? path };
           const { largeBlob } = options;
           const busyBefore = result.busy.length;
+          tookOne();
           if (largeBlob !== undefined && (await put(path, entry, () => largeBlob(file, path)))) {
             const stat = await fs.stat(path);
             if (stat !== null) {
@@ -1192,6 +1273,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           seen.set(kind, { bytes: before.bytes + object.data.length, count: before.count + 1 });
           for (const { path, entry } of wanted.get(oid)!) {
             const { data } = object;
+            tookOne();
             // Another file of this sync may have taken the name under another spelling
             if (await clashes(path, entry)) {
               continue;

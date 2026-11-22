@@ -17,6 +17,12 @@ export interface Fs {
   append(path: string, data: Uint8Array): Promise<void>;
   /** Removes a file. Nothing happens if there is none. */
   remove(path: string): Promise<void>;
+  /**
+   * Removes a file that a person may want back: one that the remote removed.
+   * Where the app has a place for such files, it goes there. Without this
+   * the file is removed as with `remove`.
+   */
+  discard?(path: string): Promise<void>;
   /** Removes a folder if it is empty. Nothing happens if it is not, or if there is none. */
   removeDir(path: string): Promise<void>;
   /** Gives a file another name. The folders above the new name exist. */
@@ -55,9 +61,13 @@ export class VerifiedFs implements Fs {
   rewritten = 0;
   readLink?: (path: string) => Promise<string | null>;
   writeLink?: (path: string, target: string) => Promise<void>;
+  discard?: (path: string) => Promise<void>;
 
   constructor(inner: Fs) {
     this.inner = inner;
+    if (inner.discard !== undefined) {
+      this.discard = (path) => inner.discard!(path);
+    }
     if (inner.readLink !== undefined && inner.writeLink !== undefined) {
       this.readLink = (path) => inner.readLink!(path);
       this.writeLink = (path, target) => inner.writeLink!(path, target);

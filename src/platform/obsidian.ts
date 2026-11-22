@@ -21,9 +21,18 @@ export class ObsidianFs implements Fs {
   private readonly adapter: DataAdapter;
   /** Folders that are known to exist, so that they are asked about once */
   private readonly made = new Set<string>([""]);
+  /** Puts a file where the app keeps what a person deleted. False if it is not a file that the app does that for. */
+  private readonly trash: ((path: string) => Promise<boolean>) | null;
 
-  constructor(adapter: DataAdapter) {
+  constructor(adapter: DataAdapter, trash?: (path: string) => Promise<boolean>) {
     this.adapter = adapter;
+    this.trash = trash ?? null;
+  }
+
+  async discard(path: string): Promise<void> {
+    if (this.trash === null || !(await this.trash(path))) {
+      await this.remove(path);
+    }
   }
 
   private async mkdirs(dir: string): Promise<void> {

@@ -1,0 +1,117 @@
+/* The icon of the ribbon turns while a sync runs. */
+.piecemeal-git-syncing svg {
+  animation: piecemeal-git-turn 1.2s linear infinite;
+}
+
+@keyframes piecemeal-git-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A dot on the icon after a sync that left something to look at, or failed. */
+.piecemeal-git-attention,
+.piecemeal-git-failed {
+  position: relative;
+}
+
+.piecemeal-git-attention::after,
+.piecemeal-git-failed::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--color-orange);
+}
+
+.piecemeal-git-failed::after {
+  background-color: var(--color-red);
+}
+
+/* The status bar of the desktop app: an icon and a few words that can be clicked. */
+.piecemeal-git-status {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  cursor: var(--cursor);
+}
+
+.piecemeal-git-status .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+}
+
+/* The button in a notice that opens what the sync did. */
+.piecemeal-git-notice-button {
+  margin-top: var(--size-4-2);
+}
+
+/* The dialogs. */
+.piecemeal-git-modal .piecemeal-git-note {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin: var(--size-2-2) 0;
+}
+
+.piecemeal-git-modal .piecemeal-git-failed-text {
+  color: var(--text-error);
+}
+
+.piecemeal-git-modal .piecemeal-git-path {
+  word-break: break-word;
+}
+
+.piecemeal-git-modal .piecemeal-git-label {
+  color: var(--text-muted);
+}
+
+.piecemeal-git-modal details {
+  margin: var(--size-2-2) 0;
+}
+
+.piecemeal-git-modal summary {
+  cursor: var(--cursor);
+  padding: var(--size-2-2) 0;
+}
+
+.piecemeal-git-modal details ul {
+  margin: 0;
+  padding-inline-start: var(--size-4-6);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.piecemeal-git-modal .piecemeal-git-plan {
+  padding-inline-start: var(--size-4-5);
+}
+
+.piecemeal-git-modal .piecemeal-git-plan > li {
+  margin: var(--size-4-2) 0;
+}
+
+/* One file that both sides changed: its two versions, and the two ways to be done with it. */
+.piecemeal-git-copy {
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  padding: var(--size-4-2) var(--size-4-3);
+  margin: var(--size-4-2) 0;
+}
+
+/* A row of buttons: side by side, and each as wide as the other where a finger has to hit them. */
+.piecemeal-git-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-3);
+}
+
+.is-mobile .piecemeal-git-buttons button {
+  flex: 1 1 0;
+}
+
+.piecemeal-git-modal .piecemeal-git-state {
+  margin-bottom: var(--size-4-2);
+}

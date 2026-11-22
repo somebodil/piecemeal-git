@@ -25,7 +25,7 @@ import { TestServer } from "../testing/server.ts";
 import { VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";
-import { sync, type SyncOptions, type SyncResult } from "./sync.ts";
+import { CancelledError, type Plan, sync, type SyncOptions, type SyncResult } from "./sync.ts";
 
 describe("sync", () => {
   const server = new TestServer();
@@ -761,6 +761,93 @@ describe("sync", () => {
   });
 
   // A phone and most computers take "a.md" and "A.md" for one file. Git does not.
+  describe("for a person who watches", () => {
+    it("says what it is about to do, and changes nothing when it is told to stop", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n", "c.md": "c\n" });
+      w.writePhone("mine.md", "mine\n");
+      w.writePhone("a.md", "a of the phone\n");
+      const plans: Plan[] = [];
+      await assert.rejects(
+        w.syncPhone({
+          confirm: (plan) => {
+            plans.push(plan);
+            return Promise.resolve(false);
+          },
+        }),
+        CancelledError,
+      );
+      assert.deepEqual([...plans], [{ first: true, tracked: 0, take: 3, send: 2, removeHere: [], removeThere: [], bothChanged: ["a.md"] }]);
+      assert.deepEqual([w.readPhone("b.md"), existsSync(path.join(w.phoneDir, ".piecemeal/state.json")), w.pathsThere()], [null, false, ["a.md", "b.md", "c.md"]]);
+
+      await w.syncPhone({ confirm: () => Promise.resolve(true) });
+      w.removePhone("b.md");
+      w.commitThere({ "c.md": null });
+      await w.syncPhone({
+        confirm: (plan) => {
+          plans.push(plan);
+          return Promise.resolve(true);
+        },
+      });
+      assert.deepEqual(plans[1], { first: false, tracked: 5, take: 0, send: 0, removeHere: ["c.md"], removeThere: ["b.md"], bothChanged: [] });
+    });
+
+    it("asks once, also when the sync starts over", async () => {
+      const w = setup({ "a.md": "a\n" });
+      await w.syncPhone();
+      w.writePhone("b.md", "b\n");
+      let asked = 0;
+      let pushes = 0;
+      await w.syncPhone({
+        confirm: () => Promise.resolve(++asked > 0),
+        http: (request) => {
+          if (request.url.endsWith("/git-receive-pack") && ++pushes === 1) {
+            w.writePc("c.md", "c\n");
+            w.pushPc();
+          }
+          return nodeHttp(request);
+        },
+      });
+      assert.deepEqual([asked, pushes], [1, 2]);
+    });
+
+    it("tells how far it is", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+      await w.syncPhone();
+      w.writePc("a.md", "a again\n");
+      w.writePc("c.md", "c\n");
+      w.pushPc();
+      w.writePhone("d.md", "d\n");
+      const told: string[] = [];
+      await w.syncPhone({ onProgress: (p) => told.push(`${p.step} ${p.done}/${p.total}`) });
+      assert.deepEqual(told, ["looking 0/0", "sending 0/1", "taking 0/2", "taking 1/2", "taking 2/2"]);
+    });
+
+    it("puts a file that the remote removed where a person can get it back, if there is such a place", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+      await w.syncPhone();
+      w.commitThere({ "b.md": null });
+      const kept: string[] = [];
+      const fs = new NodeFs(w.phoneDir) as NodeFs & { discard?: (file: string) => Promise<void> };
+      fs.discard = async (file) => {
+        kept.push(file);
+        await fs.rename(file, `.trash-${file}`);
+      };
+      const result = await w.syncPhone({ fs: new VerifiedFs(fs) });
+      assert.deepEqual([result.deletedHere, kept, w.readPhone("b.md"), w.readPhone(".trash-b.md")], [["b.md"], ["b.md"], null, "b\n"]);
+    });
+
+    it("takes the word of the remote for what a file is, when the vault holds the same content for the first time", async () => {
+      const w = setup({ "a.md": "a\n" });
+      w.commitThere({ "to a": { link: "a.md" } });
+      // A phone that held the files before, from a copy: the link is a file there that holds where it points
+      w.writePhone("a.md", "a\n");
+      w.writePhone("to a", "a.md");
+      const result = await w.syncPhone({ fs: new CaseBlindFs(new NodeFs(w.phoneDir)) });
+      assert.deepEqual([result.conflicts, result.uploaded, result.downloaded], [[], [], []]);
+      assert.equal(server.git(path.basename(w.url), "ls-tree", "main", "--", "to a").split(/\s/)[0], "120000");
+    });
+  });
+
   describe("with branches", () => {
     const repo = (w: { url: string }): string => path.basename(w.url);
     const branches = (w: { url: string }): string[] =>

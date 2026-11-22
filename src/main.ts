@@ -1,44 +1,13 @@
-import { type App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, type SettingDefinitionItem } from "obsidian";
+import { Notice, Platform, Plugin, setIcon, TFile } from "obsidian";
+import { VerifiedFs } from "./git/fs.ts";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { remoteOf } from "./git/protocol.ts";
-import { VerifiedFs } from "./git/fs.ts";
-import { sync, type SyncResult } from "./git/sync.ts";
+import { CancelledError, type Progress, sync, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
-
-interface Settings {
-  /** The address of the repository, as `git clone` takes it over HTTPS */
-  url: string;
-  /** The branch to sync with. Empty for the one the repository opens with. */
-  branch: string;
-  /** The name under which the token is kept in the secret storage of Obsidian */
-  tokenSecret: string;
-  /** Who the commits of this device are by */
-  authorName: string;
-  authorEmail: string;
-  /** What the commits of this device call it */
-  device: string;
-  /** A file larger than this many megabytes is not sent from this device */
-  maxFileMB: number;
-  /** What both sides changed in different places of a text is put together, as git does */
-  mergeText: boolean;
-  /** A sync starts by itself every so many minutes. 0 for never. */
-  everyMinutes: number;
-  /** A sync starts by itself when Obsidian has opened the vault */
-  onStart: boolean;
-}
-
-const DEFAULTS: Settings = {
-  url: "",
-  branch: "",
-  tokenSecret: "",
-  authorName: "",
-  authorEmail: "",
-  device: "",
-  maxFileMB: 20,
-  mergeText: true,
-  everyMinutes: 0,
-  onStart: false,
-};
+import { ConfirmModal } from "./ui/confirm.ts";
+import { conflictCopies, ReportModal } from "./ui/report.ts";
+import { DEFAULTS, type Settings, SettingsTab } from "./ui/settings.ts";
+import { ago, concerns, explain, headline, notes, progressText, worthAsking } from "./ui/words.ts";
 
 const MB = 1024 * 1024;
 /** Where the plugin keeps the commits, the folders and what it last agreed on */
@@ -46,60 +15,41 @@ const STORE_DIR = ".piecemeal";
 /** About how much content one request asks for or sends */
 const BATCH_BYTES = 4 * MB;
 
-function list(paths: string[]): string {
-  const shown = paths.slice(0, 5).join(", ");
-  return paths.length > 5 ? `${shown} and ${paths.length - 5} more` : shown;
-}
-
-/** What a sync did, for a person to read. The second value says if it asks for attention. */
-function summary(result: SyncResult): [string, boolean] {
-  const lines = [
-    result.downloaded.length + result.uploaded.length + result.deletedHere.length + result.deletedThere.length === 0
-      ? "Nothing to sync."
-      : `Synced: ${result.downloaded.length + result.deletedHere.length} taken, ${result.uploaded.length + result.deletedThere.length} sent.`,
-  ];
-  if (result.merged.length > 0) {
-    lines.push(`Changed on both sides, and put together: ${list(result.merged)}.`);
-  }
-  // Up to here it is worth reading, and nothing that has to be done something about
-  const told = lines.length;
-  if (result.conflicts.length > 0) {
-    lines.push(
-      `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. Your version stays, the other one is kept beside it as a copy.`,
-    );
-  }
-  if (result.tooLargeIgnored.length > 0) {
-    lines.push(`Too large to send, and written into .gitignore: ${list(result.tooLargeIgnored)}.`);
-  }
-  if (result.tooLargeChanged.length > 0) {
-    lines.push(`Changed here but now too large to send: ${list(result.tooLargeChanged)}. The repository keeps its version.`);
-  }
-  if (result.tooLargeThere.length > 0) {
-    lines.push(`Too large to get on this device, and left out of the vault: ${list(result.tooLargeThere)}.`);
-  }
-  if (result.sameName.length > 0) {
-    lines.push(
-      `Named like another file but for capital letters, which this device cannot tell apart, and left out of the vault: ${list(result.sameName)}.`,
-    );
-  }
-  if (result.busy.length > 0) {
-    lines.push(`Changed while the sync ran, left for the next one: ${list(result.busy)}.`);
-  }
-  return [lines.join("\n"), lines.length > told];
+/** How the last sync went. Kept with the settings, so that it is known after Obsidian starts again. */
+export interface Last {
+  /** When it ended, in milliseconds since 1970 */
+  at: number;
+  ok: boolean;
+  /** What it did, or why it failed, in a line */
+  text: string;
+  /** True if it left something for a person to look at */
+  attention: boolean;
 }
 
 export default class PiecemealGitPlugin extends Plugin {
   config: Settings = { ...DEFAULTS };
-  private running = false;
+  /** How the last sync went, or null if there has been none */
+  last: Last | null = null;
+  /** What the last sync did, file by file. Known until Obsidian closes. */
+  lastResult: SyncResult | null = null;
+  running = false;
+  /** How far the sync is that runs */
+  private progress: Progress | null = null;
   /** The timer of the syncs that start by themselves */
   private timer: number | null = null;
   /** True after a sync that nobody asked for failed, so that it is said once and not every few minutes */
   private failedUnasked = false;
   /** How many files had to be written a second time since the plugin was loaded, because the first write left them cut off */
   rewritten = 0;
+  private ribbonEl: HTMLElement | null = null;
+  private statusEl: HTMLElement | null = null;
+  private report: ReportModal | null = null;
 
   override async onload(): Promise<void> {
-    this.config = { ...DEFAULTS, ...((await this.loadData()) as Partial<Settings> | null) };
+    const data = ((await this.loadData()) ?? {}) as Partial<Settings> & { last?: Last | null };
+    const { last, ...config } = data;
+    this.config = { ...DEFAULTS, ...config };
+    this.last = last ?? null;
     this.addSettingTab(new SettingsTab(this.app, this));
     this.schedule();
     this.app.workspace.onLayoutReady(() => {
@@ -114,13 +64,33 @@ export default class PiecemealGitPlugin extends Plugin {
         void this.sync();
       },
     });
-    this.addRibbonIcon("refresh-cw", "Sync with the repository", () => {
+    this.addCommand({
+      id: "report",
+      name: "Show what the last sync did",
+      callback: () => {
+        this.openReport();
+      },
+    });
+    this.ribbonEl = this.addRibbonIcon("refresh-cw", "Sync with the repository", () => {
       void this.sync();
     });
+    // The desktop app has a bar at the bottom. The mobile app shows none.
+    this.statusEl = this.addStatusBarItem();
+    this.statusEl.addClass("piecemeal-git-status", "mod-clickable");
+    this.statusEl.addEventListener("click", () => {
+      this.openReport();
+    });
+    this.registerInterval(window.setInterval(() => this.refresh(), 30_000));
+    this.refresh();
+  }
+
+  override onunload(): void {
+    this.report?.close();
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.config);
+    await this.saveData({ ...this.config, last: this.last });
+    this.refresh();
   }
 
   /** Starts the timer over. Called when the plugin loads and when the minutes change. */
@@ -134,6 +104,84 @@ export default class PiecemealGitPlugin extends Plugin {
       this.timer = window.setInterval(() => void this.sync(true), minutes * 60_000);
       this.registerInterval(this.timer);
     }
+  }
+
+  openReport(): void {
+    // One at a time: asked for twice, it is the same list, not one on top of the other
+    this.report?.close();
+    this.report = new ReportModal(this.app, this);
+    this.report.open();
+  }
+
+  /** Opens the settings of Obsidian at the tab of this plugin. */
+  openSettings(): void {
+    // Not a part of what Obsidian promises to plugins, so it is asked for with care
+    const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
+    setting?.open?.();
+    setting?.openTabById?.(this.manifest.id);
+  }
+
+  /** Brings the icon of the ribbon and the status bar up to what is known. */
+  private refresh(): void {
+    const { last } = this;
+    let icon = "refresh-cw";
+    let words = "Not synced yet";
+    if (this.running) {
+      words = this.progress === null ? "Syncing…" : progressText(this.progress);
+    } else if (this.config.url === "") {
+      words = "No repository yet";
+    } else if (last !== null) {
+      if (!last.ok) {
+        icon = "alert-triangle";
+        words = `Sync failed ${ago(last.at)}`;
+      } else if (last.attention || conflictCopies(this.app).length > 0) {
+        icon = "alert-circle";
+        words = `Synced ${ago(last.at)}, with something to look at`;
+      } else {
+        icon = "check";
+        words = `Synced ${ago(last.at)}`;
+      }
+    }
+    if (this.ribbonEl !== null) {
+      this.ribbonEl.toggleClass("piecemeal-git-syncing", this.running);
+      this.ribbonEl.toggleClass("piecemeal-git-failed", !this.running && icon === "alert-triangle");
+      this.ribbonEl.toggleClass("piecemeal-git-attention", !this.running && icon === "alert-circle");
+      this.ribbonEl.setAttribute("aria-label", this.running ? words : `Sync with the repository\n${words}`);
+    }
+    if (this.statusEl !== null) {
+      this.statusEl.empty();
+      setIcon(this.statusEl.createSpan(), this.running ? "refresh-cw" : icon);
+      this.statusEl.toggleClass("piecemeal-git-syncing", this.running);
+      this.statusEl.createSpan({ text: words.replace(/^Syncing… /, "") });
+      this.statusEl.setAttribute("aria-label", "Show what the last sync did");
+    }
+  }
+
+  /** Tells what a sync did. One that left something to look at stays until it is closed, and opens the list. */
+  private tell(result: SyncResult, unasked: boolean): void {
+    const calm = [headline(result), ...notes(result)];
+    const toLookAt = concerns(result);
+    const taken = result.downloaded.length + result.deletedHere.length + result.merged.length;
+    if (toLookAt.length === 0) {
+      if (!unasked || taken > 0) {
+        new Notice(calm.join("\n"), 5000);
+      }
+      return;
+    }
+    const notice = new Notice("", 0);
+    notice.setMessage(
+      createFragment((fragment) => {
+        for (const line of [...calm, ...toLookAt]) {
+          fragment.createDiv({ text: line });
+        }
+        const button = fragment.createEl("button", { text: "Show the files", cls: "piecemeal-git-notice-button" });
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          notice.hide();
+          this.openReport();
+        });
+      }),
+    );
   }
 
   /**
@@ -152,15 +200,30 @@ export default class PiecemealGitPlugin extends Plugin {
     const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText } = this.config;
     if (url === "") {
       if (!unasked) {
-        new Notice("Give the address of the repository in the settings first.");
+        new Notice("Give the address of the repository first.");
+        this.openSettings();
       }
       return null;
     }
     this.running = true;
-    const progress = unasked ? null : new Notice("Syncing…", 0);
+    this.progress = null;
+    this.refresh();
+    let waiting = unasked ? null : new Notice("Syncing…", 0);
+    /** True if a sync that nobody asked for stopped because a person should see first what it is about to do */
+    let held = false;
     try {
       const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
-      const fs = new VerifiedFs(new ObsidianFs(this.app.vault.adapter));
+      const fs = new VerifiedFs(
+        new ObsidianFs(this.app.vault.adapter, async (path) => {
+          // A file that the remote removed goes where Obsidian puts the files that a person deletes
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (!(file instanceof TFile)) {
+            return false;
+          }
+          await this.app.fileManager.trashFile(file);
+          return true;
+        }),
+      );
       const remote = remoteOf(url, token);
       const github = parseGitHub(remote.url);
       const ownData = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
@@ -185,148 +248,59 @@ export default class PiecemealGitPlugin extends Plugin {
         batchBytes: BATCH_BYTES,
         sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
         largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
+        onProgress: (progress) => {
+          this.progress = progress;
+          waiting?.setMessage(progressText(progress));
+          this.refresh();
+        },
+        confirm: async (plan) => {
+          if (!worthAsking(plan)) {
+            return true;
+          }
+          if (unasked) {
+            held = true;
+            return false;
+          }
+          waiting?.hide();
+          const go = await new ConfirmModal(this.app, plan).ask();
+          if (go) {
+            waiting = new Notice("Syncing…", 0);
+          }
+          return go;
+        },
       });
-      const [text, attention] = summary(result);
-      const taken = result.downloaded.length + result.deletedHere.length + result.merged.length;
-      if (!unasked || attention || taken > 0) {
-        new Notice(text, attention ? 0 : 5000);
-      }
-      this.failedUnasked = false;
       this.rewritten += fs.rewritten;
+      this.lastResult = result;
+      const toLookAt = concerns(result);
+      this.last = { at: Date.now(), ok: true, text: [headline(result), ...notes(result), ...toLookAt].join(" "), attention: toLookAt.length > 0 };
+      this.failedUnasked = false;
+      waiting?.hide();
+      this.tell(result, unasked);
       return result;
     } catch (error) {
+      waiting?.hide();
+      if (error instanceof CancelledError) {
+        if (held && !this.failedUnasked) {
+          new Notice(
+            "A sync was held back: it is about to remove many files, or it is the first one with this repository. Start the sync yourself to see what it is about to do.",
+            0,
+          );
+        }
+        this.failedUnasked = held;
+        return null;
+      }
       console.error("Piecemeal Git: the sync failed", error);
+      const why = explain(error);
+      this.last = { at: Date.now(), ok: false, text: why, attention: true };
       if (!unasked || !this.failedUnasked) {
-        new Notice(`The sync failed. ${error instanceof Error ? error.message : String(error)}`, 0);
+        new Notice(`The sync failed. ${why}`, 0);
       }
       this.failedUnasked = unasked;
       return null;
     } finally {
-      progress?.hide();
       this.running = false;
-    }
-  }
-}
-
-/** A row of the settings: what it is called, and which of the settings it holds. */
-type Row = { name: string; desc?: string } & (
-  | { type: "text"; key: "url" | "branch" | "authorName" | "authorEmail" | "device"; placeholder: string }
-  | { type: "secret"; key: "tokenSecret" }
-  | { type: "number"; key: "maxFileMB" | "everyMinutes"; min: number }
-  | { type: "toggle"; key: "onStart" | "mergeText" }
-);
-
-const ROWS: Row[] = [
-  { type: "text", key: "url", name: "Repository", desc: "The address that git clones over HTTPS.", placeholder: "https://github.com/you/vault.git" },
-  {
-    type: "secret",
-    key: "tokenSecret",
-    name: "Token",
-    desc: "A token that may read and write the contents of this one repository. It is kept in the secret storage of Obsidian, not in the vault. If the host wants the name of your account with it, put the name into the address: https://name@host/you/vault.git",
-  },
-  { type: "text", key: "branch", name: "Branch", desc: "Leave empty for the branch that the repository opens with.", placeholder: "main" },
-  {
-    type: "number",
-    key: "maxFileMB",
-    name: "Largest file to send",
-    desc: "In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told. A file of the repository that was left out for its size comes once this lets it in.",
-    min: 1,
-  },
-  {
-    type: "toggle",
-    key: "mergeText",
-    name: "Put texts together",
-    desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, your version stays and the other one is kept beside it as a copy.",
-  },
-  {
-    type: "number",
-    key: "everyMinutes",
-    name: "Sync every",
-    desc: "In minutes. 0 to sync only when you run the command. A sync that starts by itself tells you only when it took something, when something asks for your attention, or when it failed.",
-    min: 0,
-  },
-  { type: "toggle", key: "onStart", name: "Sync when Obsidian starts" },
-  { type: "text", key: "authorName", name: "Name on commits", desc: "Who the commits of this device are by.", placeholder: "Your name" },
-  { type: "text", key: "authorEmail", name: "Email on commits", placeholder: "you@example.com" },
-  { type: "text", key: "device", name: "Name of this device", desc: "The message of a commit says where it is from.", placeholder: "My phone" },
-];
-
-class SettingsTab extends PluginSettingTab {
-  private readonly plugin: PiecemealGitPlugin;
-
-  constructor(app: App, plugin: PiecemealGitPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  /**
-   * What Obsidian 1.13 and later makes the rows from. Rows that are told this
-   * way are found by the search of the settings.
-   */
-  override getSettingDefinitions(): SettingDefinitionItem[] {
-    return ROWS.map((row) => {
-      const { name, desc, key } = row;
-      switch (row.type) {
-        case "text":
-          return { name, desc, control: { type: "text", key, placeholder: row.placeholder } };
-        case "secret":
-          return { name, desc, control: { type: "secret", key } };
-        case "number":
-          return { name, desc, control: { type: "number", key, min: row.min } };
-        case "toggle":
-          return { name, desc, control: { type: "toggle", key } };
-      }
-    });
-  }
-
-  override getControlValue(key: string): unknown {
-    return this.plugin.config[key as keyof Settings];
-  }
-
-  override async setControlValue(key: string, value: unknown): Promise<void> {
-    const row = ROWS.find((other) => other.key === key);
-    if (row === undefined) {
-      return;
-    }
-    const settings = this.plugin.config;
-    if (row.type === "number") {
-      if (typeof value !== "number" || !Number.isFinite(value) || value < row.min) {
-        return;
-      }
-      settings[row.key] = value;
-    } else if (row.type === "toggle") {
-      settings[row.key] = value === true;
-    } else {
-      settings[row.key] = typeof value === "string" ? value.trim() : "";
-    }
-    await this.plugin.saveSettings();
-    if (row.key === "everyMinutes") {
-      this.plugin.schedule();
-    }
-  }
-
-  /** The same rows for Obsidian before 1.13, which has to be given each of them. */
-  override display(): void {
-    const { containerEl } = this;
-    const settings = this.plugin.config;
-    containerEl.empty();
-    for (const row of ROWS) {
-      const setting = new Setting(containerEl).setName(row.name).setDesc(row.desc ?? "");
-      const change = (value: unknown): Promise<void> => this.setControlValue(row.key, value);
-      switch (row.type) {
-        case "text":
-          setting.addText((input) => input.setPlaceholder(row.placeholder).setValue(settings[row.key]).onChange(change));
-          break;
-        case "secret":
-          setting.addComponent((el) => new SecretComponent(this.app, el).setValue(settings[row.key]).onChange(change));
-          break;
-        case "number":
-          setting.addText((input) => input.setValue(String(settings[row.key])).onChange((value) => change(Number(value))));
-          break;
-        case "toggle":
-          setting.addToggle((toggle) => toggle.setValue(settings[row.key]).onChange(change));
-          break;
-      }
+      this.progress = null;
+      await this.saveSettings();
     }
   }
 }
