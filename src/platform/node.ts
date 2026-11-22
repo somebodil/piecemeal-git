@@ -58,6 +58,14 @@ export class NodeFs implements Fs {
     }
   }
 
+  async isDir(p: string): Promise<boolean> {
+    try {
+      return (await fsp.stat(this.abs(p))).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
   async list(dir: string): Promise<{ files: string[]; dirs: string[] }> {
     const out = { files: [] as string[], dirs: [] as string[] };
     let entries;

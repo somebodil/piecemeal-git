@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
+import { CaseBlindFs } from "../testing/case-blind-fs.ts";
 import { TestServer } from "../testing/server.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { sync, type SyncOptions, type SyncResult } from "./sync.ts";
@@ -451,5 +452,82 @@ describe("sync", () => {
     w.pullPc();
     assert.equal(existsSync(path.join(w.pcDir, ".piecemeal")), false);
     rmSync(path.join(w.phoneDir, ".git"), { recursive: true });
+  });
+
+  // A phone and most computers take "a.md" and "A.md" for one file. Git does not.
+  describe("in a vault that does not tell capital letters from small ones", () => {
+    const blind = (w: { phoneDir: string }): Partial<SyncOptions> => ({ fs: new CaseBlindFs(new NodeFs(w.phoneDir)) });
+    const names = (dir: string): string[] => readdirSync(dir).filter((name) => name !== ".piecemeal").sort();
+
+    it("leaves out a file of the remote that is named like another but for capital letters", async () => {
+      const w = setup({ "Note.md": "capital\n", "note.md": "small\n", "other.md": "other\n" });
+      const first = await w.syncPhone(blind(w));
+      assert.equal(first.sameName.length, 1);
+      const [out] = first.sameName;
+      const kept = out === "Note.md" ? "note.md" : "Note.md";
+      assert.deepEqual(names(w.phoneDir), [kept, "other.md"].sort());
+      assert.equal(w.readPhone(kept), kept === "Note.md" ? "capital\n" : "small\n");
+
+      // Nothing of this goes back to the remote
+      const second = await w.syncPhone(blind(w));
+      assert.deepEqual([second.uploaded, second.deletedThere, second.downloaded, second.sameName], [[], [], [], []]);
+      assert.deepEqual(w.log(), ["first"]);
+
+      // A change of the file that was left out does not reach the one that is here
+      w.writePc(out, "changed on the computer\n");
+      w.pushPc("change");
+      const third = await w.syncPhone(blind(w));
+      assert.deepEqual([third.sameName, third.downloaded, third.uploaded, third.busy], [[out], [], [], []]);
+      assert.equal(w.readPhone(kept), kept === "Note.md" ? "capital\n" : "small\n");
+
+      // Nor does its removal
+      rmSync(path.join(w.pcDir, out));
+      w.pushPc("removal");
+      const fourth = await w.syncPhone(blind(w));
+      assert.deepEqual([fourth.deletedHere, fourth.uploaded, fourth.deletedThere, fourth.busy], [[], [], [], []]);
+      assert.deepEqual(names(w.phoneDir), [kept, "other.md"].sort());
+      const fifth = await w.syncPhone(blind(w));
+      assert.deepEqual([fifth.downloaded, fifth.uploaded, fifth.deletedThere], [[], [], []]);
+      assert.deepEqual(w.log(), ["removal", "change", "first"]);
+    });
+
+    it("leaves out a file of a folder that is spelled otherwise in the vault", async () => {
+      const w = setup({ "Notes/a.md": "a\n" });
+      await w.syncPhone(blind(w));
+      w.writePc("notes/b.md", "b\n");
+      w.pushPc("another spelling");
+      const result = await w.syncPhone(blind(w));
+      assert.deepEqual([result.sameName, result.downloaded], [["notes/b.md"], []]);
+      assert.deepEqual(names(path.join(w.phoneDir, "Notes")), ["a.md"]);
+      const again = await w.syncPhone(blind(w));
+      assert.deepEqual([again.uploaded, again.deletedThere], [[], []]);
+    });
+
+    it("takes a name that the remote spells otherwise now", async () => {
+      const w = setup({ "Note.md": "a note\n" });
+      await w.syncPhone(blind(w));
+      renameSync(path.join(w.pcDir, "Note.md"), path.join(w.pcDir, "note.md"));
+      w.pushPc("small letters");
+      const result = await w.syncPhone(blind(w));
+      assert.deepEqual([result.deletedHere, result.downloaded, result.sameName], [["Note.md"], ["note.md"], []]);
+      assert.deepEqual(names(w.phoneDir), ["note.md"]);
+      assert.equal(w.readPhone("note.md"), "a note\n");
+      const again = await w.syncPhone(blind(w));
+      assert.deepEqual([again.uploaded, again.deletedThere, again.downloaded], [[], [], []]);
+    });
+
+    it("sends a name that the vault spells otherwise now", async () => {
+      const w = setup({ "Note.md": "a note\n", "Folder/in.md": "inside\n" });
+      await w.syncPhone(blind(w));
+      renameSync(path.join(w.phoneDir, "Note.md"), path.join(w.phoneDir, "note.md"));
+      renameSync(path.join(w.phoneDir, "Folder"), path.join(w.phoneDir, "folder"));
+      const result = await w.syncPhone(blind(w));
+      assert.deepEqual([result.uploaded.sort(), result.deletedThere.sort()], [["folder/in.md", "note.md"], ["Folder/in.md", "Note.md"]]);
+      w.pullPc();
+      assert.deepEqual(names(w.pcDir), [".git", "folder", "note.md"]);
+      assert.equal(w.readPc("folder/in.md"), "inside\n");
+      const again = await w.syncPhone(blind(w));
+      assert.deepEqual([again.uploaded, again.deletedThere, again.downloaded], [[], [], []]);
+    });
   });
 });

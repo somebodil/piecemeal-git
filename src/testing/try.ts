@@ -69,6 +69,7 @@ console.log(
       tooLargeIgnored: result.tooLargeIgnored,
       tooLargeChanged: result.tooLargeChanged,
       tooLargeThere: result.tooLargeThere,
+      sameName: result.sameName,
       busy: result.busy,
       seconds: (Date.now() - started) / 1000,
       requests,

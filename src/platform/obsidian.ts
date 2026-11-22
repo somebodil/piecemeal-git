@@ -64,6 +64,8 @@ export class ObsidianFs implements Fs {
     if (dir === "" || (await this.adapter.stat(dir))?.type !== "folder") {
       return;
     }
+    // The adapter of Android removes a folder with all that is in it, whatever
+    // it is told, so the look into the folder is what keeps a file in it
     const listed = await this.adapter.list(dir);
     if (listed.files.length > 0 || listed.folders.length > 0) {
       return;
@@ -80,6 +82,10 @@ export class ObsidianFs implements Fs {
   async stat(path: string): Promise<FileStat | null> {
     const stat = await this.adapter.stat(path);
     return stat === null || stat.type !== "file" ? null : { size: stat.size, mtime: stat.mtime };
+  }
+
+  async isDir(path: string): Promise<boolean> {
+    return path === "" || (await this.adapter.stat(path))?.type === "folder";
   }
 
   async list(dir: string): Promise<{ files: string[]; dirs: string[] }> {

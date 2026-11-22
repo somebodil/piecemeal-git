@@ -74,6 +74,11 @@ export interface SyncResult {
   tooLargeChanged: string[];
   /** Files of the remote that are too large to get on this device. They are left out of the vault. */
   tooLargeThere: string[];
+  /**
+   * Files of the remote that the vault already holds under a name that differs
+   * in capital letters only. This device cannot hold both. They are left out of the vault.
+   */
+  sameName: string[];
   /** Files that changed while the sync ran. The next sync takes care of them. */
   busy: string[];
 }
@@ -234,7 +239,52 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     tooLargeIgnored: [],
     tooLargeChanged: [],
     tooLargeThere: [],
+    sameName: [],
     busy: [],
+  };
+
+  // --- How the vault spells its names ----------------------------------------
+  // Most phones and computers take "a.md" and "A.md" for the same file, and git
+  // does not. So a file is in the vault only if the vault spells every name of
+  // its path as the path does, and what the remote has under another spelling
+  // of a name of the vault cannot be put beside it.
+  const listings = new Map<string, { files: Set<string>; dirs: Set<string> }>();
+  const listing = async (dir: string): Promise<{ files: Set<string>; dirs: Set<string> }> => {
+    let listed = listings.get(dir);
+    if (listed === undefined) {
+      const { files, dirs } = await fs.list(dir);
+      listed = { files: new Set(files), dirs: new Set(dirs) };
+      listings.set(dir, listed);
+    }
+    return listed;
+  };
+  /** Notes that the sync made a file, and with it the folders above it. */
+  const noteWritten = (path: string): void => {
+    const names = path.split("/");
+    let dir = "";
+    names.forEach((name, i) => {
+      const listed = listings.get(dir);
+      if (listed !== undefined) {
+        (i === names.length - 1 ? listed.files : listed.dirs).add(name);
+      }
+      dir = join(dir, name);
+    });
+  };
+  /** True if the vault holds a file or a folder of the path, but under another spelling. */
+  const spelledOtherwise = async (path: string): Promise<boolean> => {
+    const names = path.split("/");
+    let dir = "";
+    for (let i = 0; i < names.length; i++) {
+      const isLast = i === names.length - 1;
+      const listed = await listing(dir);
+      const next = join(dir, names[i]);
+      if (!(isLast ? listed.files : listed.dirs).has(names[i])) {
+        // Not there under this spelling. If the file system finds it all the same, it is there under another.
+        return isLast ? (await fs.stat(next)) !== null : await fs.isDir(next);
+      }
+      dir = next;
+    }
+    return false;
   };
 
   // --- What was agreed on last time -----------------------------------------
@@ -326,21 +376,21 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     };
     // A folder that is ignored is not gone into, so nothing inside it is brought back
     const walk = async (dir: string, above: Level[]): Promise<void> => {
-      const listing = await fs.list(dir);
+      const listed = await listing(dir);
       let levels = above;
-      if (dir !== "" && listing.files.includes(".gitignore")) {
+      if (dir !== "" && listed.files.has(".gitignore")) {
         const own = await fs.read(join(dir, ".gitignore"));
         if (own !== null) {
           levels = [...above, { dir, decide: verdict(decode(own)) }];
         }
       }
-      for (const name of listing.files) {
+      for (const name of listed.files) {
         const path = join(dir, name);
         if (!excluded(path, false) && (base.has(path) || !ignored(levels, path, false))) {
           found.push(path);
         }
       }
-      for (const name of listing.dirs) {
+      for (const name of listed.dirs) {
         const path = join(dir, name);
         if (!excluded(path, true) && !ignored(levels, path, true)) {
           await walk(path, levels);
@@ -349,9 +399,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     };
     await walk("", [{ dir: "", decide: verdict(gitignore) }]);
     const seen = new Set(found);
-    // A file that is tracked stays tracked when its folder is ignored later
+    // A file that is tracked stays tracked when its folder is ignored later.
+    // One that got another spelling here is a file with another name now.
     for (const path of base.keys()) {
-      if (!seen.has(path) && !excluded(path, false) && (await fs.stat(path)) !== null) {
+      if (!seen.has(path) && !excluded(path, false) && (await fs.stat(path)) !== null && !(await spelledOtherwise(path))) {
         found.push(path);
         seen.add(path);
       }
@@ -370,6 +421,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     if (tooLarge.length > 0) {
       gitignore = addToBlock(gitignore, tooLarge);
       await fs.write(".gitignore", encode(gitignore));
+      noteWritten(".gitignore");
       result.tooLargeIgnored = tooLarge;
       if (!seen.has(".gitignore")) {
         found.push(".gitignore");
@@ -657,6 +709,12 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     // --- Take what the remote changed ---------------------------------------
     const emptied = new Set<string>();
     for (const path of removeHere) {
+      if (absent.has(path)) {
+        // Never was in the vault. What the vault has under that name, if anything, is another file.
+        agreed.delete(path);
+        absent.delete(path);
+        continue;
+      }
       if (await changedSinceScan(path)) {
         result.busy.push(path);
         continue;
@@ -694,22 +752,43 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
        * An empty folder with the name of the file does give way.
        */
       const put = async (path: string, write: () => Promise<boolean>): Promise<boolean> => {
+        let written: boolean;
         try {
-          return await write();
+          written = await write();
         } catch {
           await fs.removeDir(path);
+          try {
+            written = await write();
+          } catch {
+            result.busy.push(path);
+            return false;
+          }
         }
-        try {
-          return await write();
-        } catch {
-          result.busy.push(path);
+        if (written) {
+          noteWritten(path);
+        }
+        return written;
+      };
+      /**
+       * True if the vault holds the path under another spelling, which may be a
+       * file that this sync put there a moment ago. The file is then tracked
+       * without being in the vault, and the remote keeps it.
+       */
+      const clashes = async (path: string, entry: Entry): Promise<boolean> => {
+        if (!(await spelledOtherwise(path))) {
           return false;
         }
+        settle(path, entry, true);
+        result.sameName.push(path);
+        return true;
       };
       for (const { path, entry, from } of downloads) {
         if (!isFile(entry)) {
           // A link or a repository inside the repository: tracked, but not made in the vault
           settle(path, entry, true);
+          continue;
+        }
+        if (await clashes(path, entry)) {
           continue;
         }
         if (await changedSinceScan(path)) {
@@ -759,6 +838,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           }
           for (const { path, entry } of wanted.get(oid)!) {
             const { data } = object;
+            // Another file of this sync may have taken the name under another spelling
+            if (await clashes(path, entry)) {
+              continue;
+            }
             const written = await put(path, async () => {
               await fs.write(path, data);
               return true;

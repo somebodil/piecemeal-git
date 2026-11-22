@@ -10,7 +10,7 @@ It speaks the git protocol itself and needs no git program. What sets it apart i
 
 ## State
 
-The sync works from a terminal and inside the desktop app of Obsidian, against GitHub and against the git server that comes with git. It has not run on a phone yet. That is the next thing to try.
+The sync works from a terminal, inside the desktop app of Obsidian, and inside the mobile app on an emulated Android phone and tablet. It has not run on a device that one holds in a hand, and not on an iPhone or iPad.
 
 What has been checked, and how:
 
@@ -18,7 +18,7 @@ What has been checked, and how:
 - A real vault with a file far above the largest size of the settings came from a private repository on GitHub. No response was above 7.6 MB, and every file had the id that git gives it.
 - Inside the desktop app of Obsidian 1.12.7, the plugin synced a vault with the git server that comes with git, both ways: a first sync into an empty repository, changes of both sides, a file that both changed, removals, a file too large to send, a name that is a file on one side and a folder on the other, and a sync that started by itself. A clone made by git had the same files each time, and `git fsck` had nothing to say.
 - Also inside Obsidian, a public and a private repository on GitHub came into a folder without anything being sent, and in both one file came in ranges of bytes. Every file was as the repository has it.
-- With the mobile emulation of the desktop app, a sync ran and the settings showed. The emulation has the files and the requests of the desktop app, so this says nothing about a phone.
+- Inside the mobile app of Obsidian 1.15.1, on an emulated phone and an emulated tablet with Android 17, the plugin synced a vault with the git server that comes with git: a first sync, changes of both sides, a file that both changed, removals, binary files of several megabytes each way, a name that is a file on one side and a folder on the other, a sync when the app starts, and a sync without a network. After every step a clone made by git had the same files as the device, and `git fsck` had nothing to say. GitHub, a token, and the sync that a timer starts were not tried there.
 
 ## How it syncs
 
@@ -32,11 +32,12 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A folder that loses its last file to a sync is removed. One that still holds something, such as a file that is not synced, stays.
 - A file that was changed in the three seconds before a sync is read again by the next one. Its size and time alone would not tell a second change in the same moment.
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
+- A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
 
 Files that are too large:
 
 - A new file above the limit (20 MB unless you change it) is not sent. Its path is written into a part of `.gitignore` that the plugin keeps, between two marker lines, and you are told. The file stays in the vault.
-- A file of the repository above the limit is asked for in ranges of bytes and written piece by piece. The pieces are added up to the id that git gives the file, and a file with another id is not put into the vault. This works on GitHub. On another host the file is left out of the vault, and stays in the repository.
+- A file of the repository above the limit is asked for in ranges of bytes and written piece by piece. The pieces are added up to the id that git gives the file, and a file with another id is not put into the vault. This works on GitHub. Another host does not tell how large a file is before it sends it, so there the file comes in one piece, however large it is.
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 
 The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
@@ -61,11 +62,11 @@ Try it on a copy of a vault first.
 
 ## Not done yet
 
-- It has not run on a phone.
+- It has not run on a real phone or tablet, and not on iOS.
+- A file that was left out of the vault, for its size or for its name, is not looked at again until the repository changes it. Raising the limit or removing the other file does not bring it in.
 - Links and repositories inside the repository are left alone: they stay in the repository and are not made in the vault.
 - A file above the limit that is changed twice in the same moment, to the same size, is not seen as changed. It is too large to read again.
-- On a host other than GitHub the sizes of files are not known before they come, so a batch can be larger than meant.
-- The settings do not come up in the search of the settings of Obsidian 1.13 and later. That takes the newer way to declare settings, which the Obsidian that the plugin was tried in does not have.
+- On a host other than GitHub the sizes of files are not known before they come, so a batch can be larger than meant, and a file above the limit comes whole.
 
 ## Development
 

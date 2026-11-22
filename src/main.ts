@@ -1,4 +1,4 @@
-import { type App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting } from "obsidian";
+import { type App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, type SettingDefinitionItem } from "obsidian";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { sync, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
@@ -66,6 +66,11 @@ function summary(result: SyncResult): [string, boolean] {
   }
   if (result.tooLargeThere.length > 0) {
     lines.push(`Too large to get on this device, and left out of the vault: ${list(result.tooLargeThere)}.`);
+  }
+  if (result.sameName.length > 0) {
+    lines.push(
+      `Named like another file but for capital letters, which this device cannot tell apart, and left out of the vault: ${list(result.sameName)}.`,
+    );
   }
   if (result.busy.length > 0) {
     lines.push(`Changed while the sync ran, left for the next one: ${list(result.busy)}.`);
@@ -182,6 +187,43 @@ export default class PiecemealGitPlugin extends Plugin {
   }
 }
 
+/** A row of the settings: what it is called, and which of the settings it holds. */
+type Row = { name: string; desc?: string } & (
+  | { type: "text"; key: "url" | "branch" | "authorName" | "authorEmail" | "device"; placeholder: string }
+  | { type: "secret"; key: "tokenSecret" }
+  | { type: "number"; key: "maxFileMB" | "everyMinutes"; min: number }
+  | { type: "toggle"; key: "onStart" }
+);
+
+const ROWS: Row[] = [
+  { type: "text", key: "url", name: "Repository", desc: "The address that git clones over HTTPS.", placeholder: "https://github.com/you/vault.git" },
+  {
+    type: "secret",
+    key: "tokenSecret",
+    name: "Token",
+    desc: "A token that may read and write the contents of this one repository. It is kept in the secret storage of Obsidian, not in the vault.",
+  },
+  { type: "text", key: "branch", name: "Branch", desc: "Leave empty for the branch that the repository opens with.", placeholder: "main" },
+  {
+    type: "number",
+    key: "maxFileMB",
+    name: "Largest file to send",
+    desc: "In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told.",
+    min: 1,
+  },
+  {
+    type: "number",
+    key: "everyMinutes",
+    name: "Sync every",
+    desc: "In minutes. 0 to sync only when you run the command. A sync that starts by itself tells you only when it took something, when something asks for your attention, or when it failed.",
+    min: 0,
+  },
+  { type: "toggle", key: "onStart", name: "Sync when Obsidian starts" },
+  { type: "text", key: "authorName", name: "Name on commits", desc: "Who the commits of this device are by.", placeholder: "Your name" },
+  { type: "text", key: "authorEmail", name: "Email on commits", placeholder: "you@example.com" },
+  { type: "text", key: "device", name: "Name of this device", desc: "The message of a commit says where it is from.", placeholder: "My phone" },
+];
+
 class SettingsTab extends PluginSettingTab {
   private readonly plugin: PiecemealGitPlugin;
 
@@ -190,72 +232,74 @@ class SettingsTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  /**
+   * What Obsidian 1.13 and later makes the rows from. Rows that are told this
+   * way are found by the search of the settings.
+   */
+  override getSettingDefinitions(): SettingDefinitionItem[] {
+    return ROWS.map((row) => {
+      const { name, desc, key } = row;
+      switch (row.type) {
+        case "text":
+          return { name, desc, control: { type: "text", key, placeholder: row.placeholder } };
+        case "secret":
+          return { name, desc, control: { type: "secret", key } };
+        case "number":
+          return { name, desc, control: { type: "number", key, min: row.min } };
+        case "toggle":
+          return { name, desc, control: { type: "toggle", key } };
+      }
+    });
+  }
+
+  override getControlValue(key: string): unknown {
+    return this.plugin.config[key as keyof Settings];
+  }
+
+  override async setControlValue(key: string, value: unknown): Promise<void> {
+    const row = ROWS.find((other) => other.key === key);
+    if (row === undefined) {
+      return;
+    }
+    const settings = this.plugin.config;
+    if (row.type === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < row.min) {
+        return;
+      }
+      settings[row.key] = value;
+    } else if (row.type === "toggle") {
+      settings[row.key] = value === true;
+    } else {
+      settings[row.key] = typeof value === "string" ? value.trim() : "";
+    }
+    await this.plugin.saveSettings();
+    if (row.key === "everyMinutes") {
+      this.plugin.schedule();
+    }
+  }
+
+  /** The same rows for Obsidian before 1.13, which has to be given each of them. */
   override display(): void {
     const { containerEl } = this;
     const settings = this.plugin.config;
     containerEl.empty();
-
-    const text = (name: string, desc: string, key: "url" | "branch" | "authorName" | "authorEmail" | "device", placeholder: string): void => {
-      new Setting(containerEl)
-        .setName(name)
-        .setDesc(desc)
-        .addText((input) =>
-          input
-            .setPlaceholder(placeholder)
-            .setValue(settings[key])
-            .onChange(async (value) => {
-              settings[key] = value.trim();
-              await this.plugin.saveSettings();
-            }),
-        );
-    };
-
-    text("Repository", "The address that git clones over HTTPS.", "url", "https://github.com/you/vault.git");
-    new Setting(containerEl)
-      .setName("Token")
-      .setDesc("A token that may read and write the contents of this one repository. It is kept in the secret storage of Obsidian, not in the vault.")
-      .addComponent((el) =>
-        new SecretComponent(this.app, el).setValue(settings.tokenSecret).onChange(async (value) => {
-          settings.tokenSecret = value ?? "";
-          await this.plugin.saveSettings();
-        }),
-      );
-    text("Branch", "Leave empty for the branch that the repository opens with.", "branch", "main");
-    new Setting(containerEl)
-      .setName("Largest file to send")
-      .setDesc("In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told.")
-      .addText((input) =>
-        input.setValue(String(settings.maxFileMB)).onChange(async (value) => {
-          const number = Number(value);
-          if (Number.isFinite(number) && number >= 1) {
-            settings.maxFileMB = number;
-            await this.plugin.saveSettings();
-          }
-        }),
-      );
-    new Setting(containerEl)
-      .setName("Sync every")
-      .setDesc("In minutes. 0 to sync only when you run the command. A sync that starts by itself tells you only when it took something, when something asks for your attention, or when it failed.")
-      .addText((input) =>
-        input.setValue(String(settings.everyMinutes)).onChange(async (value) => {
-          const number = Number(value);
-          if (Number.isFinite(number) && number >= 0) {
-            settings.everyMinutes = number;
-            await this.plugin.saveSettings();
-            this.plugin.schedule();
-          }
-        }),
-      );
-    new Setting(containerEl)
-      .setName("Sync when Obsidian starts")
-      .addToggle((toggle) =>
-        toggle.setValue(settings.onStart).onChange(async (value) => {
-          settings.onStart = value;
-          await this.plugin.saveSettings();
-        }),
-      );
-    text("Name on commits", "Who the commits of this device are by.", "authorName", "Your name");
-    text("Email on commits", "", "authorEmail", "you@example.com");
-    text("Name of this device", "The message of a commit says where it is from.", "device", "My phone");
+    for (const row of ROWS) {
+      const setting = new Setting(containerEl).setName(row.name).setDesc(row.desc ?? "");
+      const change = (value: unknown): Promise<void> => this.setControlValue(row.key, value);
+      switch (row.type) {
+        case "text":
+          setting.addText((input) => input.setPlaceholder(row.placeholder).setValue(settings[row.key]).onChange(change));
+          break;
+        case "secret":
+          setting.addComponent((el) => new SecretComponent(this.app, el).setValue(settings[row.key]).onChange(change));
+          break;
+        case "number":
+          setting.addText((input) => input.setValue(String(settings[row.key])).onChange((value) => change(Number(value))));
+          break;
+        case "toggle":
+          setting.addToggle((toggle) => toggle.setValue(settings[row.key]).onChange(change));
+          break;
+      }
+    }
   }
 }

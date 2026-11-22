@@ -23,7 +23,9 @@ export interface Fs {
   rename(from: string, to: string): Promise<void>;
   /** Size and time of a file, or null if there is none or it is a folder. */
   stat(path: string): Promise<FileStat | null>;
-  /** The names in a folder. Empty if there is no such folder. */
+  /** True if there is a folder with this path. */
+  isDir(path: string): Promise<boolean>;
+  /** The names in a folder, spelled as the folder has them. Empty if there is no such folder. */
   list(dir: string): Promise<{ files: string[]; dirs: string[] }>;
 }
 
