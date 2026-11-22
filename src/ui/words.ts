@@ -73,9 +73,7 @@ export function concerns(result: SyncResult): string[] {
       `Named like another file but for capital letters, which this device cannot tell apart, and left out of the vault: ${list(result.sameName)}.`,
     );
   }
-  if (result.busy.length > 0) {
-    lines.push(`Changed while the sync ran, left for the next one: ${list(result.busy)}.`);
-  }
+  // A file that changed while the sync ran is not told here: the next sync takes care of it by itself
   return lines;
 }
 

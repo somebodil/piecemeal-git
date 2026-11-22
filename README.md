@@ -62,7 +62,7 @@ Files that are too large:
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 - A tracked file above the limit that gets another name on the device keeps what the repository has for it, under the new name. It is too large to be read, so it is known by its size: a new file above the limit that has, to the byte, the size of a tracked file that is gone is taken for that file.
 
-The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
+The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian, nor the two files in which Obsidian keeps what is open on a device are ever synced. What the repository has under those names stays there and is not taken.
 
 ## Trying it
 
@@ -82,7 +82,7 @@ The token goes to the server as git sends it, as a password. GitHub and GitLab t
 
 A sync can also start by itself: every so many minutes, and when Obsidian has opened the vault. Both are in the settings and are off at first. Such a sync says nothing while it runs. Afterwards it tells you only that it took something, that something asks for your attention, or that it failed, and a failure is said once and not every few minutes.
 
-The files that Obsidian keeps for one device, `workspace.json` and `workspace-mobile.json` in its settings folder, change whenever you open a note. Put them into `.gitignore`, or every sync sends them.
+The files that Obsidian keeps for one device, `workspace.json` and `workspace-mobile.json` in its settings folder, change whenever you open a note. The plugin never syncs them.
 
 Try it on a copy of a vault first.
 

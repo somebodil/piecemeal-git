@@ -146,7 +146,10 @@ export default class PiecemealGitPlugin extends Plugin {
       this.ribbonEl.toggleClass("piecemeal-git-syncing", this.running);
       this.ribbonEl.toggleClass("piecemeal-git-failed", !this.running && icon === "alert-triangle");
       this.ribbonEl.toggleClass("piecemeal-git-attention", !this.running && icon === "alert-circle");
-      this.ribbonEl.setAttribute("aria-label", this.running ? words : `Sync with the repository\n${words}`);
+      // The mobile app shows this as the name of the action in a list, so there it stays as it is
+      if (!Platform.isMobile) {
+        this.ribbonEl.setAttribute("aria-label", this.running ? words : `Sync with the repository\n${words}`);
+      }
     }
     if (this.statusEl !== null) {
       this.statusEl.empty();
@@ -226,7 +229,10 @@ export default class PiecemealGitPlugin extends Plugin {
       );
       const remote = remoteOf(url, token);
       const github = parseGitHub(remote.url);
-      const ownData = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
+      const { configDir } = this.app.vault;
+      // What stays on the device: the settings of this plugin, the trash of Obsidian, and the files in
+      // which Obsidian keeps what is open on this device, which change whenever a note is opened
+      const own = new Set([`${configDir}/plugins/${this.manifest.id}/data.json`, `${configDir}/workspace.json`, `${configDir}/workspace-mobile.json`]);
       const from = device !== "" ? device : Platform.isMobile ? "a phone" : "a computer";
       const result = await sync({
         fs,
@@ -234,8 +240,7 @@ export default class PiecemealGitPlugin extends Plugin {
         remote,
         branch: branch === "" ? undefined : branch,
         storeDir: STORE_DIR,
-        // The settings of this plugin stay on the device, and so does the trash of Obsidian
-        exclude: (path) => path === ownData || path === ".trash" || path.startsWith(".trash/"),
+        exclude: (path) => own.has(path) || path === ".trash" || path.startsWith(".trash/"),
         author: {
           name: authorName !== "" ? authorName : "Piecemeal Git",
           email: authorEmail !== "" ? authorEmail : "piecemeal-git@users.noreply.github.com",
