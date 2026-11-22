@@ -11,13 +11,19 @@ import * as path from "node:path";
  */
 export class TestServer {
   readonly root: string;
+  /** True if the folder was made for this server, and goes with it */
+  private readonly temporary: boolean;
   private server: Server | null = null;
   private port = 0;
   /** Sizes of the bodies that the server sent, to see that responses stay small */
   readonly responseSizes: number[] = [];
+  /** Told about every request that was answered */
+  onResponse: ((method: string, path: string, status: number, bytes: number) => void) | null = null;
 
-  constructor() {
-    this.root = mkdtempSync(path.join(tmpdir(), "piecemeal-"));
+  /** @param root a folder of repositories to serve. Without it the server makes one, and removes it when it stops. */
+  constructor(root?: string) {
+    this.temporary = root === undefined;
+    this.root = root ?? mkdtempSync(path.join(tmpdir(), "piecemeal-"));
   }
 
   /** Runs git in a folder under the root and returns what it prints. */
@@ -98,7 +104,8 @@ export class TestServer {
     this.git(".", "clone", "-q", path.join(this.root, `${name}.git`), into);
   }
 
-  async start(): Promise<void> {
+  /** @param host "0.0.0.0" to let other devices of the network in, such as a phone */
+  async start(host = "127.0.0.1", port = 0): Promise<void> {
     this.server = createServer((request, response) => {
       const chunks: Buffer[] = [];
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -137,6 +144,7 @@ export class TestServer {
           }
           const payload = all.subarray(split + 4);
           this.responseSizes.push(payload.length);
+          this.onResponse?.(request.method ?? "GET", url.pathname, status, payload.length);
           response.statusCode = status;
           response.end(payload);
         });
@@ -144,7 +152,7 @@ export class TestServer {
       });
     });
     await new Promise<void>((resolve) => {
-      this.server!.listen(0, "127.0.0.1", () => resolve());
+      this.server!.listen(port, host, () => resolve());
     });
     const address = this.server.address();
     this.port = typeof address === "object" && address !== null ? address.port : 0;
@@ -154,6 +162,8 @@ export class TestServer {
     await new Promise<void>((resolve) => {
       this.server?.close(() => resolve());
     });
-    rmSync(this.root, { recursive: true, force: true });
+    if (this.temporary) {
+      rmSync(this.root, { recursive: true, force: true });
+    }
   }
 }

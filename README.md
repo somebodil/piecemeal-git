@@ -56,6 +56,8 @@ TOKEN=... node src/testing/try.ts https://github.com/you/vault.git /some/folder 
 
 `--read-only` stops the sync before it would send anything. Without it, what the folder holds and the repository does not is sent.
 
+For a phone to sync with a repository on your computer, with no host and no token in between, `node src/testing/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
+
 In Obsidian: build, then copy `main.js` and `manifest.json` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. Then run the command "Sync with the repository".
 
 A sync can also start by itself: every so many minutes, and when Obsidian has opened the vault. Both are in the settings and are off at first. Such a sync says nothing while it runs. Afterwards it tells you only that it took something, that something asks for your attention, or that it failed, and a failure is said once and not every few minutes.
