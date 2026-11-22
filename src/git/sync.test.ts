@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
@@ -312,6 +312,135 @@ describe("sync", () => {
     const w = setup({ "a.md": "a\n" });
     await w.syncPhone();
     await assert.rejects(w.syncPhone({ remote: { url: `${w.url}x` } }), /was synced with/);
+  });
+
+  it("reads the .gitignore of a folder too, as git does", async () => {
+    const w = setup({ "a.md": "a\n", ".gitignore": "*.log\n" });
+    await w.syncPhone();
+    w.writePhone("sub/.gitignore", "*.tmp\n/only-here.md\n!keep.log\n");
+    w.writePhone("sub/scratch.tmp", "ignored by the folder\n");
+    w.writePhone("sub/only-here.md", "ignored by the folder\n");
+    w.writePhone("sub/deeper/only-here.md", "a line with a slash is for the folder of its file only\n");
+    w.writePhone("sub/deeper/x.tmp", "ignored further down too\n");
+    w.writePhone("sub/keep.log", "brought back by the folder\n");
+    w.writePhone("sub/other.log", "ignored by the vault\n");
+    w.writePhone("top.tmp", "the file of the folder says nothing here\n");
+    const result = await w.syncPhone();
+    assert.deepEqual(result.uploaded.sort(), ["sub/.gitignore", "sub/deeper/only-here.md", "sub/keep.log", "top.tmp"]);
+    // git sees the same: nothing in the folder of the computer is left to add
+    w.pullPc();
+    for (const file of ["sub/scratch.tmp", "sub/only-here.md", "sub/deeper/x.tmp", "sub/other.log"]) {
+      w.writePc(file, "x");
+    }
+    assert.equal(server.git(path.basename(w.pcDir), "status", "--porcelain"), "");
+  });
+
+  it("removes a folder that lost its last file, and leaves one that still holds something", async () => {
+    const w = setup({ "gone/deep/a.md": "a\n", "gone/b.md": "b\n", "stays/c.md": "c\n", "stays/d.md": "d\n", "mine/e.md": "e\n" });
+    await w.syncPhone();
+    w.writePhone("mine/not synced.tmp", "the vault alone has this\n");
+    w.writePhone(".gitignore", "*.tmp\n");
+    rmSync(path.join(w.pcDir, "gone"), { recursive: true });
+    unlinkSync(path.join(w.pcDir, "stays/c.md"));
+    unlinkSync(path.join(w.pcDir, "mine/e.md"));
+    w.pushPc();
+    const result = await w.syncPhone();
+    assert.deepEqual(result.deletedHere.sort(), ["gone/b.md", "gone/deep/a.md", "mine/e.md", "stays/c.md"]);
+    assert.equal(existsSync(path.join(w.phoneDir, "gone")), false);
+    assert.equal(existsSync(path.join(w.phoneDir, "stays")), true);
+    assert.equal(w.readPhone("mine/not synced.tmp"), "the vault alone has this\n");
+  });
+
+  it("takes a file that became a folder on the computer, and a folder that became a file", async () => {
+    const w = setup({ "thing": "a file\n", "other/inner.md": "in a folder\n" });
+    await w.syncPhone();
+    unlinkSync(path.join(w.pcDir, "thing"));
+    w.writePc("thing/now inside.md", "inside\n");
+    rmSync(path.join(w.pcDir, "other"), { recursive: true });
+    w.writePc("other", "now a file\n");
+    w.pushPc();
+    const result = await w.syncPhone();
+    assert.deepEqual(result.busy, []);
+    assert.equal(w.readPhone("thing/now inside.md"), "inside\n");
+    assert.equal(w.readPhone("other"), "now a file\n");
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded, again.deletedThere], [[], [], []]);
+  });
+
+  it("keeps both when a name is a file here and a folder there, or the other way round", async () => {
+    const w = setup({ "a.md": "a\n" });
+    await w.syncPhone();
+    w.writePc("plan/steps.md", "the computer made a folder\n");
+    w.writePc("notes", "the computer made a file\n");
+    w.pushPc();
+    w.writePhone("plan", "the phone made a file\n");
+    w.writePhone("notes/idea.md", "the phone made a folder\n");
+    const result = await w.syncPhone();
+
+    const copies = { "plan/steps.md": "plan (conflict 2026-11-22 0915)/steps.md", notes: "notes (conflict 2026-11-22 0915)" };
+    assert.deepEqual(
+      result.conflicts.sort((x, y) => x.path.localeCompare(y.path)),
+      [
+        { path: "notes", copy: copies.notes },
+        { path: "plan/steps.md", copy: copies["plan/steps.md"] },
+      ],
+    );
+    assert.equal(w.readPhone("plan"), "the phone made a file\n");
+    assert.equal(w.readPhone(copies["plan/steps.md"]), "the computer made a folder\n");
+    assert.equal(w.readPhone("notes/idea.md"), "the phone made a folder\n");
+    assert.equal(w.readPhone(copies.notes), "the computer made a file\n");
+    assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+
+    w.pullPc();
+    assert.equal(w.readPc("plan"), "the phone made a file\n");
+    assert.equal(w.readPc(copies["plan/steps.md"]), "the computer made a folder\n");
+    assert.equal(w.readPc("notes/idea.md"), "the phone made a folder\n");
+    assert.equal(w.readPc(copies.notes), "the computer made a file\n");
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded, again.conflicts], [[], [], []]);
+  });
+
+  it("puts a file where the vault has an empty folder of that name", async () => {
+    const w = setup({ "a.md": "a\n" });
+    await w.syncPhone();
+    mkdirSync(path.join(w.phoneDir, "report"));
+    w.writePc("report", "a file on the computer\n");
+    w.pushPc();
+    const result = await w.syncPhone();
+    assert.deepEqual([result.downloaded, result.busy], [["report"], []]);
+    assert.equal(w.readPhone("report"), "a file on the computer\n");
+  });
+
+  it("sees a change that left the size and the time of a file as they were", async () => {
+    const w = setup({ "a.md": "a\n" });
+    await w.syncPhone();
+    // A file that is written right before a sync, as a note that is being typed
+    const file = path.join(w.phoneDir, "typed.md");
+    writeFileSync(file, "first\n");
+    await w.syncPhone();
+    const { mtime } = statSync(file);
+    writeFileSync(file, "other\n");
+    utimesSync(file, mtime, mtime);
+    const result = await w.syncPhone();
+    assert.deepEqual(result.uploaded, ["typed.md"]);
+    w.pullPc();
+    assert.equal(w.readPc("typed.md"), "other\n");
+  });
+
+  it("leaves a path that is never synced alone on both sides", async () => {
+    const w = setup({ "a.md": "a\n", "device/settings.json": "the computer's\n", ".piecemeal/state.json": "not ours\n" });
+    const exclude = (file: string): boolean => file === "device/settings.json";
+    w.writePhone("device/settings.json", "the phone's\n");
+    const first = await w.syncPhone({ exclude });
+    assert.deepEqual([first.downloaded, first.uploaded, first.conflicts], [["a.md"], [], []]);
+    assert.equal(w.readPhone("device/settings.json"), "the phone's\n");
+    // The next sync does not take the missing agreement for a removal either
+    w.writePhone("a.md", "a changed\n");
+    const second = await w.syncPhone({ exclude });
+    assert.deepEqual([second.uploaded, second.deletedThere], [["a.md"], []]);
+    w.pullPc();
+    assert.equal(w.readPc("device/settings.json"), "the computer's\n");
+    assert.equal(w.readPc(".piecemeal/state.json"), "not ours\n");
   });
 
   it("never touches its own folder or a .git folder", async () => {

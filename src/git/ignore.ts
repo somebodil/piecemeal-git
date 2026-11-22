@@ -4,6 +4,13 @@ export const BLOCK_END = "# <<< Piecemeal Git";
 /** Says if `.gitignore` leaves a path out. A folder is asked about with `isDir`. */
 export type Ignores = (path: string, isDir: boolean) => boolean;
 
+/**
+ * What one `.gitignore` says about a path, which is relative to the folder of
+ * that file: true to leave it out, false to keep it after all, and undefined
+ * when no line of the file matches. The folders above the path are not looked at.
+ */
+export type Verdict = (path: string, isDir: boolean) => boolean | undefined;
+
 interface Rule {
   negated: boolean;
   dirOnly: boolean;
@@ -91,17 +98,14 @@ function compile(raw: string): Rule | null {
   return { negated, dirOnly, regex: whole(out), folder: folder === undefined ? undefined : whole(folder) };
 }
 
-/**
- * Reads a `.gitignore` the way git does: the last line that matches decides,
- * and what is inside an ignored folder cannot be brought back.
- */
-export function matcher(gitignore: string): Ignores {
+/** The lines of one `.gitignore`. The last line that matches a path decides. */
+export function verdict(gitignore: string): Verdict {
   const rules = gitignore
     .split("\n")
     .map(compile)
     .filter((rule) => rule !== null);
-  const decide = (path: string, isDir: boolean): boolean => {
-    let ignored = false;
+  return (path, isDir) => {
+    let ignored: boolean | undefined;
     for (const rule of rules) {
       if (rule.dirOnly && !isDir) {
         continue;
@@ -112,13 +116,21 @@ export function matcher(gitignore: string): Ignores {
     }
     return ignored;
   };
+}
+
+/**
+ * Reads a `.gitignore` the way git does: the last line that matches decides,
+ * and what is inside an ignored folder cannot be brought back.
+ */
+export function matcher(gitignore: string): Ignores {
+  const decide = verdict(gitignore);
   return (path, isDir) => {
     for (let slash = path.indexOf("/"); slash >= 0; slash = path.indexOf("/", slash + 1)) {
-      if (decide(path.slice(0, slash), true)) {
+      if (decide(path.slice(0, slash), true) === true) {
         return true;
       }
     }
-    return decide(path, isDir);
+    return decide(path, isDir) === true;
   };
 }
 

@@ -37,6 +37,14 @@ export class NodeFs implements Fs {
     await fsp.rm(this.abs(p), { force: true });
   }
 
+  async removeDir(p: string): Promise<void> {
+    try {
+      await fsp.rmdir(this.abs(p));
+    } catch {
+      // Not empty, not a folder, or not there
+    }
+  }
+
   async rename(from: string, to: string): Promise<void> {
     await fsp.rename(this.abs(from), this.abs(to));
   }

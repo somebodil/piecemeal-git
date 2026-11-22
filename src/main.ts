@@ -17,6 +17,10 @@ interface Settings {
   device: string;
   /** A file larger than this many megabytes is not sent from this device */
   maxFileMB: number;
+  /** A sync starts by itself every so many minutes. 0 for never. */
+  everyMinutes: number;
+  /** A sync starts by itself when Obsidian has opened the vault */
+  onStart: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -27,6 +31,8 @@ const DEFAULTS: Settings = {
   authorEmail: "",
   device: "",
   maxFileMB: 20,
+  everyMinutes: 0,
+  onStart: false,
 };
 
 const MB = 1024 * 1024;
@@ -70,10 +76,20 @@ function summary(result: SyncResult): [string, boolean] {
 export default class PiecemealGitPlugin extends Plugin {
   config: Settings = { ...DEFAULTS };
   private running = false;
+  /** The timer of the syncs that start by themselves */
+  private timer: number | null = null;
+  /** True after a sync that nobody asked for failed, so that it is said once and not every few minutes */
+  private failedUnasked = false;
 
   override async onload(): Promise<void> {
     this.config = { ...DEFAULTS, ...((await this.loadData()) as Partial<Settings> | null) };
     this.addSettingTab(new SettingsTab(this.app, this));
+    this.schedule();
+    this.app.workspace.onLayoutReady(() => {
+      if (this.config.onStart) {
+        void this.sync(true);
+      }
+    });
     this.addCommand({
       id: "sync",
       name: "Sync with the repository",
@@ -90,18 +106,40 @@ export default class PiecemealGitPlugin extends Plugin {
     await this.saveData(this.config);
   }
 
-  async sync(): Promise<void> {
+  /** Starts the timer over. Called when the plugin loads and when the minutes change. */
+  schedule(): void {
+    if (this.timer !== null) {
+      window.clearInterval(this.timer);
+      this.timer = null;
+    }
+    const minutes = this.config.everyMinutes;
+    if (minutes > 0) {
+      this.timer = window.setInterval(() => void this.sync(true), minutes * 60_000);
+      this.registerInterval(this.timer);
+    }
+  }
+
+  /**
+   * @param unasked true for a sync that started by itself. It says nothing
+   *   while it runs, and afterwards only what is worth an interruption: that
+   *   something was taken, that something asks for attention, or that it failed.
+   */
+  async sync(unasked = false): Promise<void> {
     if (this.running) {
-      new Notice("A sync is running already.");
+      if (!unasked) {
+        new Notice("A sync is running already.");
+      }
       return;
     }
     const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB } = this.config;
     if (url === "") {
-      new Notice("Give the address of the repository in the settings first.");
+      if (!unasked) {
+        new Notice("Give the address of the repository in the settings first.");
+      }
       return;
     }
     this.running = true;
-    const progress = new Notice("Syncing…", 0);
+    const progress = unasked ? null : new Notice("Syncing…", 0);
     try {
       const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
       const fs = new ObsidianFs(this.app.vault.adapter);
@@ -127,11 +165,18 @@ export default class PiecemealGitPlugin extends Plugin {
         largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
       });
       const [text, attention] = summary(result);
-      new Notice(text, attention ? 0 : 5000);
+      const taken = result.downloaded.length + result.deletedHere.length;
+      if (!unasked || attention || taken > 0) {
+        new Notice(text, attention ? 0 : 5000);
+      }
+      this.failedUnasked = false;
     } catch (error) {
-      new Notice(`The sync failed. ${error instanceof Error ? error.message : String(error)}`, 0);
+      if (!unasked || !this.failedUnasked) {
+        new Notice(`The sync failed. ${error instanceof Error ? error.message : String(error)}`, 0);
+      }
+      this.failedUnasked = unasked;
     } finally {
-      progress.hide();
+      progress?.hide();
       this.running = false;
     }
   }
@@ -186,6 +231,27 @@ class SettingsTab extends PluginSettingTab {
             settings.maxFileMB = number;
             await this.plugin.saveSettings();
           }
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Sync every")
+      .setDesc("In minutes. 0 to sync only when you run the command. A sync that starts by itself tells you only when it took something, when something asks for your attention, or when it failed.")
+      .addText((input) =>
+        input.setValue(String(settings.everyMinutes)).onChange(async (value) => {
+          const number = Number(value);
+          if (Number.isFinite(number) && number >= 0) {
+            settings.everyMinutes = number;
+            await this.plugin.saveSettings();
+            this.plugin.schedule();
+          }
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Sync when Obsidian starts")
+      .addToggle((toggle) =>
+        toggle.setValue(settings.onStart).onChange(async (value) => {
+          settings.onStart = value;
+          await this.plugin.saveSettings();
         }),
       );
     text("Name on commits", "Who the commits of this device are by.", "authorName", "Your name");

@@ -60,7 +60,20 @@ export class ObsidianFs implements Fs {
     }
   }
 
+  async removeDir(dir: string): Promise<void> {
+    if (dir === "" || (await this.adapter.stat(dir))?.type !== "folder") {
+      return;
+    }
+    const listed = await this.adapter.list(dir);
+    if (listed.files.length > 0 || listed.folders.length > 0) {
+      return;
+    }
+    await this.adapter.rmdir(dir, false);
+    this.made.delete(dir);
+  }
+
   async rename(from: string, to: string): Promise<void> {
+    await this.mkdirs(parent(to));
     await this.adapter.rename(from, to);
   }
 

@@ -1,7 +1,7 @@
 import { decode, encode } from "./bytes.ts";
 import { type FileStat, type Fs, join } from "./fs.ts";
 import { type Http } from "./http.ts";
-import { addToBlock, matcher } from "./ignore.ts";
+import { addToBlock, type Verdict, verdict } from "./ignore.ts";
 import {
   type GitObject,
   MODE_EXECUTABLE,
@@ -90,7 +90,18 @@ interface State {
   stat: Record<string, FileStat>;
   /** Paths of `tree` that are not in the vault: too large, or not a file */
   absent: Record<string, true>;
+  /**
+   * Files that were changed so shortly before `stat` was noted that another
+   * change could leave their size and time as they are. They are read again.
+   */
+  racy?: Record<string, true>;
 }
+
+/**
+ * How far apart two changes of a file are at least for its time to differ:
+ * the coarsest clock of a file system that a vault is kept on, and a little more.
+ */
+const RACY_MS = 3000;
 
 class MissingObjectError extends Error {}
 
@@ -100,6 +111,12 @@ function same(a: Entry | undefined, b: Entry | undefined): boolean {
 
 function isFile(entry: Entry): boolean {
   return entry.mode === MODE_FILE || entry.mode === MODE_EXECUTABLE;
+}
+
+/** The folder of a path, which is "" for a path at the top. */
+function folderOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
 }
 
 /** All files under a tree, by path, and the ids of the tree and the trees inside it. */
@@ -289,26 +306,48 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   // --- What the vault holds now ---------------------------------------------
   const here = new Map<string, Entry>();
   const stats = new Map<string, FileStat>();
+  /** The files that the vault holds, whatever is to become of them */
+  const present = new Set<string>();
   {
     let gitignore = decode((await fs.read(".gitignore")) ?? new Uint8Array(0));
-    let ignores = matcher(gitignore);
     const found: string[] = [];
-    const walk = async (dir: string): Promise<void> => {
+    /** The `.gitignore` files that have a say in a folder, the one of the vault first */
+    type Level = { dir: string; decide: Verdict };
+    const ignored = (levels: Level[], path: string, isDir: boolean): boolean => {
+      // As in git, the file of the innermost folder that says something decides
+      for (let i = levels.length - 1; i >= 0; i--) {
+        const { dir, decide } = levels[i];
+        const said = decide(dir === "" ? path : path.slice(dir.length + 1), isDir);
+        if (said !== undefined) {
+          return said;
+        }
+      }
+      return false;
+    };
+    // A folder that is ignored is not gone into, so nothing inside it is brought back
+    const walk = async (dir: string, above: Level[]): Promise<void> => {
       const listing = await fs.list(dir);
+      let levels = above;
+      if (dir !== "" && listing.files.includes(".gitignore")) {
+        const own = await fs.read(join(dir, ".gitignore"));
+        if (own !== null) {
+          levels = [...above, { dir, decide: verdict(decode(own)) }];
+        }
+      }
       for (const name of listing.files) {
         const path = join(dir, name);
-        if (!excluded(path, false) && (base.has(path) || !ignores(path, false))) {
+        if (!excluded(path, false) && (base.has(path) || !ignored(levels, path, false))) {
           found.push(path);
         }
       }
       for (const name of listing.dirs) {
         const path = join(dir, name);
-        if (!excluded(path, true) && !ignores(path, true)) {
-          await walk(path);
+        if (!excluded(path, true) && !ignored(levels, path, true)) {
+          await walk(path, levels);
         }
       }
     };
-    await walk("");
+    await walk("", [{ dir: "", decide: verdict(gitignore) }]);
     const seen = new Set(found);
     // A file that is tracked stays tracked when its folder is ignored later
     for (const path of base.keys()) {
@@ -331,7 +370,6 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     if (tooLarge.length > 0) {
       gitignore = addToBlock(gitignore, tooLarge);
       await fs.write(".gitignore", encode(gitignore));
-      ignores = matcher(gitignore);
       result.tooLargeIgnored = tooLarge;
       if (!seen.has(".gitignore")) {
         found.push(".gitignore");
@@ -348,9 +386,16 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       if (stat === null) {
         continue;
       }
+      present.add(path);
       const agreed = base.get(path);
       const before = state.stat[path];
-      const unchanged = agreed !== undefined && before !== undefined && before.size === stat.size && before.mtime === stat.mtime;
+      const unchanged =
+        agreed !== undefined &&
+        before !== undefined &&
+        before.size === stat.size &&
+        before.mtime === stat.mtime &&
+        // A file that is too large to read cannot be looked at again, so its size and time have to do
+        (state.racy?.[path] !== true || stat.size > options.maxFileBytes);
       if (unchanged) {
         here.set(path, agreed);
       } else if (stat.size > options.maxFileBytes) {
@@ -390,6 +435,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   const removeHere: string[] = [];
   const paths = new Set([...base.keys(), ...here.keys(), ...there.keys()]);
   for (const path of paths) {
+    if (excluded(path, false)) {
+      // Never synced: whatever the remote has under this name stays there, and is not taken
+      continue;
+    }
     const b = base.get(path);
     const h = here.get(path);
     const t = there.get(path);
@@ -430,6 +479,60 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     }
   }
 
+  // --- A name that is a file on one side and a folder on the other ----------
+  // Neither a vault nor a commit can hold both. What the vault holds keeps its
+  // name, and what the remote has goes beside it under another name, as with
+  // a file that both sides changed.
+  {
+    const removing = new Set(removeHere);
+    const isHere = (path: string): boolean => present.has(path) && !removing.has(path);
+    const names = new Set([...target.keys(), ...uploads]);
+    const folders = new Set<string>();
+    for (const name of names) {
+      for (let dir = folderOf(name); dir !== ""; dir = folderOf(dir)) {
+        folders.add(dir);
+      }
+    }
+    const taken = (path: string): boolean => paths.has(path) || names.has(path) || folders.has(path);
+    /** Gives what the remote has at `from` the name `to`: in the commit, and where it is taken to */
+    const move = (from: string, to: string): void => {
+      const entry = target.get(from);
+      if (entry === undefined) {
+        return;
+      }
+      target.delete(from);
+      target.set(to, entry);
+      names.add(to);
+      const download = downloads.find((item) => item.path === from);
+      if (download !== undefined) {
+        download.from = download.from ?? from;
+        download.path = to;
+      } else {
+        // Tracked but not in the vault. Only its name changes.
+        agreed.delete(from);
+        agreed.set(to, entry);
+        if (absent.delete(from)) {
+          absent.add(to);
+        }
+      }
+      result.conflicts.push({ path: from, copy: to });
+    };
+    for (const file of [...names].filter((name) => folders.has(name)).sort()) {
+      if (isHere(file)) {
+        // A file here and a folder there: the folder of the remote gets the other name
+        const copy = conflictPath(file, now, taken);
+        for (const inside of [...target.keys()]) {
+          if (inside.startsWith(`${file}/`) && !isHere(inside)) {
+            move(inside, copy + inside.slice(file.length));
+          }
+        }
+      } else {
+        // A folder here and a file there
+        move(file, conflictPath(file, now, taken));
+      }
+    }
+  }
+
   const saveState = async (): Promise<void> => {
     const next: State = {
       version: 1,
@@ -439,13 +542,19 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       tree: Object.fromEntries(agreed),
       stat: {},
       absent: {},
+      racy: {},
     };
+    // A file that changed this shortly before now can change again without its time moving on
+    const racyAfter = Date.now() - RACY_MS;
     for (const path of agreed.keys()) {
       const stat = stats.get(path);
       if (absent.has(path)) {
         next.absent[path] = true;
       } else if (stat !== undefined) {
         next.stat[path] = stat;
+        if (stat.mtime > racyAfter) {
+          next.racy![path] = true;
+        }
       }
     }
     await fs.write(statePath, encode(JSON.stringify(next)));
@@ -546,6 +655,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     }
 
     // --- Take what the remote changed ---------------------------------------
+    const emptied = new Set<string>();
     for (const path of removeHere) {
       if (await changedSinceScan(path)) {
         result.busy.push(path);
@@ -556,6 +666,13 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       agreed.delete(path);
       absent.delete(path);
       result.deletedHere.push(path);
+      for (let dir = folderOf(path); dir !== ""; dir = folderOf(dir)) {
+        emptied.add(dir);
+      }
+    }
+    // A folder that lost its last file goes too, the innermost first. One that still holds something stays.
+    for (const dir of [...emptied].sort((a, b) => b.length - a.length)) {
+      await fs.removeDir(dir);
     }
 
     if (downloads.length > 0) {
@@ -571,6 +688,24 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           absent.delete(path);
         }
       };
+      /**
+       * Does what puts a file into the vault. False if the vault has something in
+       * its place that does not give way, such as a file where a folder is to be.
+       * An empty folder with the name of the file does give way.
+       */
+      const put = async (path: string, write: () => Promise<boolean>): Promise<boolean> => {
+        try {
+          return await write();
+        } catch {
+          await fs.removeDir(path);
+        }
+        try {
+          return await write();
+        } catch {
+          result.busy.push(path);
+          return false;
+        }
+      };
       for (const { path, entry, from } of downloads) {
         if (!isFile(entry)) {
           // A link or a repository inside the repository: tracked, but not made in the vault
@@ -584,14 +719,16 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         const size = sizes.get(entry.oid);
         if (size !== undefined && size > options.maxFileBytes) {
           const file = { oid: entry.oid, size, commit: thereCommit!, path: from ?? path };
-          if (options.largeBlob !== undefined && (await options.largeBlob(file, path))) {
+          const { largeBlob } = options;
+          const busyBefore = result.busy.length;
+          if (largeBlob !== undefined && (await put(path, () => largeBlob(file, path)))) {
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);
             }
             settle(path, entry, false);
             result.downloaded.push(path);
-          } else {
+          } else if (result.busy.length === busyBefore) {
             settle(path, entry, true);
             result.tooLargeThere.push(path);
           }
@@ -621,7 +758,14 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
             throw new Error(`fetch: the server did not send ${oid}`);
           }
           for (const { path, entry } of wanted.get(oid)!) {
-            await fs.write(path, object.data);
+            const { data } = object;
+            const written = await put(path, async () => {
+              await fs.write(path, data);
+              return true;
+            });
+            if (!written) {
+              continue;
+            }
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);

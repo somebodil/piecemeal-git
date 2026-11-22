@@ -1,6 +1,7 @@
-import { decode } from "./bytes.ts";
+import { decode, encode } from "./bytes.ts";
 import { type Fs } from "./fs.ts";
 import { type Http, type HttpResponse } from "./http.ts";
+import { Sha1 } from "./sha1.ts";
 import { type LargeFile } from "./sync.ts";
 
 /**
@@ -79,6 +80,9 @@ export function githubSizes(
  * the other. The file is named by a commit and its path there, because the
  * address that takes a file by its id does not give pieces of a private
  * repository: it sends the whole file whatever range is asked for.
+ *
+ * The pieces are added up to the id that git gives the file, and a file with
+ * another id is not put into the vault.
  */
 export function githubLargeBlob(
   http: Http,
@@ -97,6 +101,8 @@ export function githubLargeBlob(
     await fs.remove(part);
     const encoded = file.path.split("/").map(encodeURIComponent).join("/");
     const extra: Record<string, string> = token !== undefined && token !== "" ? { Authorization: `token ${token}` } : {};
+    // The id of a file is the SHA-1 of a short header and its content
+    const hash = new Sha1().update(encode(`blob ${file.size}\0`));
     for (let at = 0; at < file.size; at += chunkBytes) {
       const last = Math.min(at + chunkBytes, file.size) - 1;
       const response: HttpResponse = await http({
@@ -109,10 +115,11 @@ export function githubLargeBlob(
         await fs.remove(part);
         return false;
       }
+      hash.update(response.body);
       await fs.append(part, response.body);
     }
     const written = await fs.stat(part);
-    if (written === null || written.size !== file.size) {
+    if (written === null || written.size !== file.size || hash.hex() !== file.oid) {
       await fs.remove(part);
       return false;
     }
