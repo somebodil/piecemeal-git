@@ -41,7 +41,24 @@ export class ObjectStore {
     if (raw === null) {
       return null;
     }
-    const object = unwrap(inflate(raw));
+    // A file that is cut off, empty, or not what its name says is as good as none.
+    // It is removed, so that the object is asked for and written again.
+    let object: GitObject | null = null;
+    try {
+      const inflated = inflate(raw) as Uint8Array | undefined;
+      if (inflated !== undefined) {
+        const read = unwrap(inflated);
+        if ((await objectId(read)) === oid) {
+          object = read;
+        }
+      }
+    } catch {
+      // Not an object
+    }
+    if (object === null) {
+      await this.fs.remove(this.path(oid));
+      return null;
+    }
     this.cache.set(oid, object);
     return object;
   }

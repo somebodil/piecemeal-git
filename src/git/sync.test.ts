@@ -20,7 +20,9 @@ import { after, before, describe, it } from "node:test";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
 import { CaseBlindFs } from "../testing/case-blind-fs.ts";
 import { DecomposingFs } from "../testing/decomposing-fs.ts";
+import { FlakyFs } from "../testing/flaky-fs.ts";
 import { TestServer } from "../testing/server.ts";
+import { VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";
 import { sync, type SyncOptions, type SyncResult } from "./sync.ts";
@@ -692,6 +694,66 @@ describe("sync", () => {
   });
 
   // A phone and most computers take "a.md" and "A.md" for one file. Git does not.
+  describe("in a vault whose files are not always written", () => {
+    it("writes a file again that came out empty", async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 12; i++) {
+        files[`dir ${i % 3}/note ${i}.md`] = `note ${i}\n`;
+      }
+      const w = setup(files);
+      // Every fifth write is lost, whatever it is: a note, a commit, a folder, what was agreed on
+      const flaky = new FlakyFs(new NodeFs(w.phoneDir), (_path, nth) => nth % 5 === 2);
+      const fs = new VerifiedFs(flaky);
+      const result = await w.syncPhone({ fs });
+      assert.equal(result.downloaded.length, 12);
+      assert.ok(flaky.lost.length >= 4, `only ${flaky.lost.length} writes were lost`);
+      assert.equal(fs.rewritten, flaky.lost.length);
+      for (const [file, content] of Object.entries(files)) {
+        assert.equal(w.readPhone(file), content);
+      }
+      w.writePhone("new.md", "new\n");
+      w.writePc("dir 0/note 0.md", "changed\n");
+      w.pushPc();
+      const second = await w.syncPhone({ fs });
+      assert.deepEqual([second.downloaded, second.uploaded], [["dir 0/note 0.md"], ["new.md"]]);
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    });
+
+    it("gives up on a file that never gets written", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+      const fs = new VerifiedFs(new FlakyFs(new NodeFs(w.phoneDir), (file) => file === "b.md"));
+      const first = await w.syncPhone({ fs });
+      // The file that came out empty is gone again, so that it is not taken for a note of the phone
+      assert.deepEqual([first.downloaded, first.busy, w.readPhone("a.md"), w.readPhone("b.md")], [["a.md"], ["b.md"], "a\n", null]);
+      const still = await w.syncPhone({ fs });
+      assert.deepEqual([still.busy, still.deletedThere, still.uploaded], [["b.md"], [], []]);
+      // It comes once it can be written, and the remote has kept it all the while
+      const result = await w.syncPhone();
+      assert.deepEqual([result.downloaded, result.deletedThere, w.readPhone("b.md")], [["b.md"], [], "b\n"]);
+      assert.deepEqual(w.pathsThere(), ["a.md", "b.md"]);
+    });
+
+    it("asks again for a commit or a folder that it kept and cannot read any more", async () => {
+      const w = setup({ "a.md": "a\n", "dir/b.md": "b\n" });
+      await w.syncPhone();
+      const objects = path.join(w.phoneDir, ".piecemeal/objects");
+      const kept = readdirSync(objects).flatMap((dir) => readdirSync(path.join(objects, dir)).map((file) => path.join(objects, dir, file)));
+      assert.equal(kept.length, 3);
+      // One is empty, one is cut off, one holds another object
+      const whole = readFileSync(kept[2]);
+      writeFileSync(kept[0], "");
+      writeFileSync(kept[1], readFileSync(kept[1]).subarray(0, 10));
+      writeFileSync(kept[2], readFileSync(kept[0] === kept[2] ? kept[1] : kept[2]));
+      writeFileSync(kept[2], Buffer.from(whole).reverse());
+      w.writePhone("c.md", "c\n");
+      const result = await w.syncPhone();
+      assert.deepEqual([result.downloaded, result.uploaded, result.deletedHere], [[], ["c.md"], []]);
+      w.pullPc();
+      assert.deepEqual([w.readPc("a.md"), w.readPc("dir/b.md"), w.readPc("c.md")], ["a\n", "b\n", "c\n"]);
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    });
+  });
+
   describe("with links", () => {
     /** What kind of thing the branch has at a path, and what it holds. */
     const there = (w: { url: string }, file: string): [string, string] => [

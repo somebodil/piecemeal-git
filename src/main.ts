@@ -1,6 +1,7 @@
 import { type App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, type SettingDefinitionItem } from "obsidian";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { remoteOf } from "./git/protocol.ts";
+import { VerifiedFs } from "./git/fs.ts";
 import { sync, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 
@@ -94,6 +95,8 @@ export default class PiecemealGitPlugin extends Plugin {
   private timer: number | null = null;
   /** True after a sync that nobody asked for failed, so that it is said once and not every few minutes */
   private failedUnasked = false;
+  /** How many files had to be written a second time since the plugin was loaded, because the first write left them cut off */
+  rewritten = 0;
 
   override async onload(): Promise<void> {
     this.config = { ...DEFAULTS, ...((await this.loadData()) as Partial<Settings> | null) };
@@ -157,7 +160,7 @@ export default class PiecemealGitPlugin extends Plugin {
     const progress = unasked ? null : new Notice("Syncing…", 0);
     try {
       const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
-      const fs = new ObsidianFs(this.app.vault.adapter);
+      const fs = new VerifiedFs(new ObsidianFs(this.app.vault.adapter));
       const remote = remoteOf(url, token);
       const github = parseGitHub(remote.url);
       const ownData = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
@@ -189,8 +192,10 @@ export default class PiecemealGitPlugin extends Plugin {
         new Notice(text, attention ? 0 : 5000);
       }
       this.failedUnasked = false;
+      this.rewritten += fs.rewritten;
       return result;
     } catch (error) {
+      console.error("Piecemeal Git: the sync failed", error);
       if (!unasked || !this.failedUnasked) {
         new Notice(`The sync failed. ${error instanceof Error ? error.message : String(error)}`, 0);
       }

@@ -433,7 +433,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   let thereRoot: string | null = null;
   if (tip !== null) {
     if ((await store.read(tip)) === null) {
-      await fetchCommit(tip, state.commit);
+      // The commit of last time may be the one that is missing, if its file was lost
+      await fetchCommit(tip, state.commit === tip ? null : state.commit);
     }
     let read;
     try {
@@ -722,7 +723,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       continue;
     }
     if (entry.oid !== h.oid) {
-      await fs.write(path, both);
+      try {
+        await fs.write(path, both);
+      } catch (error) {
+        // The text of this device is nowhere else. It is put back before the sync stops.
+        await fs.write(path, ours);
+        throw error;
+      }
       const written = await fs.stat(path);
       if (written !== null) {
         stats.set(path, written);
@@ -987,7 +994,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
        * its place that does not give way, such as a file where a folder is to be.
        * An empty folder with the name of the file does give way.
        */
-      const put = async (path: string, write: () => Promise<boolean>): Promise<boolean> => {
+      const put = async (path: string, entry: Entry, write: () => Promise<boolean>): Promise<boolean> => {
         let written: boolean;
         try {
           written = await write();
@@ -996,6 +1003,17 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           try {
             written = await write();
           } catch {
+            // A write that failed can leave a file that is neither the old one nor the new one,
+            // and the next sync must not take that for a change of this device. So it goes, and
+            // the file counts as left out of the vault: every sync asks for it again.
+            try {
+              if ((await fs.stat(path)) !== null) {
+                await fs.remove(path);
+              }
+            } catch {
+              // Nothing more to be done about it here
+            }
+            settle(path, entry, true);
             result.busy.push(path);
             return false;
           }
@@ -1039,7 +1057,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           const file = { oid: entry.oid, size, commit: thereCommit!, path: from ?? path };
           const { largeBlob } = options;
           const busyBefore = result.busy.length;
-          if (largeBlob !== undefined && (await put(path, () => largeBlob(file, path)))) {
+          if (largeBlob !== undefined && (await put(path, entry, () => largeBlob(file, path)))) {
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);
@@ -1101,7 +1119,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
             if (await clashes(path, entry)) {
               continue;
             }
-            const written = await put(path, async () => {
+            const written = await put(path, entry, async () => {
               if (entry.mode === MODE_LINK && fs.writeLink !== undefined) {
                 await fs.writeLink(path, decode(data));
               } else {

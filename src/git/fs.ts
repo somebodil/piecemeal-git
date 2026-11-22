@@ -40,6 +40,77 @@ export interface Fs {
   writeLink?(path: string, target: string): Promise<void>;
 }
 
+/** How often a file is written before the sync gives up on it */
+const WRITE_ATTEMPTS = 3;
+
+/**
+ * The same files, with every write looked at afterwards. The app on Android
+ * has been seen to say that a file was written and to leave it empty, about
+ * once in a few hundred files. A file that does not have the size of what was
+ * written is written again.
+ */
+export class VerifiedFs implements Fs {
+  private readonly inner: Fs;
+  /** How many writes had to be done again */
+  rewritten = 0;
+  readLink?: (path: string) => Promise<string | null>;
+  writeLink?: (path: string, target: string) => Promise<void>;
+
+  constructor(inner: Fs) {
+    this.inner = inner;
+    if (inner.readLink !== undefined && inner.writeLink !== undefined) {
+      this.readLink = (path) => inner.readLink!(path);
+      this.writeLink = (path, target) => inner.writeLink!(path, target);
+    }
+  }
+
+  async write(path: string, data: Uint8Array): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      await this.inner.write(path, data);
+      const size = (await this.inner.stat(path))?.size;
+      if (size === data.length) {
+        return;
+      }
+      if (attempt === WRITE_ATTEMPTS) {
+        throw new Error(`${path} could not be written: it has ${size ?? "no"} bytes of ${data.length}`);
+      }
+      this.rewritten++;
+    }
+  }
+
+  read(path: string): Promise<Uint8Array | null> {
+    return this.inner.read(path);
+  }
+
+  append(path: string, data: Uint8Array): Promise<void> {
+    return this.inner.append(path, data);
+  }
+
+  remove(path: string): Promise<void> {
+    return this.inner.remove(path);
+  }
+
+  removeDir(path: string): Promise<void> {
+    return this.inner.removeDir(path);
+  }
+
+  rename(from: string, to: string): Promise<void> {
+    return this.inner.rename(from, to);
+  }
+
+  stat(path: string): Promise<FileStat | null> {
+    return this.inner.stat(path);
+  }
+
+  isDir(path: string): Promise<boolean> {
+    return this.inner.isDir(path);
+  }
+
+  list(dir: string): Promise<{ files: string[]; dirs: string[] }> {
+    return this.inner.list(dir);
+  }
+}
+
 export function join(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
 }
