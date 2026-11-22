@@ -389,13 +389,22 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   let state: State = { version: 1, url: remote.url, branch: "", commit: null, tree: {}, stat: {}, absent: {} };
   const saved = await fs.read(statePath);
   if (saved !== null) {
-    const parsed = JSON.parse(decode(saved)) as State;
-    if (parsed.url !== remote.url) {
-      throw new Error(
-        `This vault was synced with ${parsed.url}. To sync it with another repository, remove the folder ${options.storeDir} first.`,
-      );
+    let parsed: State | null = null;
+    try {
+      parsed = JSON.parse(decode(saved)) as State;
+    } catch {
+      // Cut off, as after an app that was stopped while it wrote. As with no file at all, the vault
+      // joins the remote anew: nothing is removed on either side, and what differs gets its copy.
+      log("what was agreed on last time cannot be read: the vault joins the remote anew");
     }
-    state = parsed;
+    if (parsed !== null && typeof parsed === "object" && typeof parsed.tree === "object") {
+      if (parsed.url !== remote.url) {
+        throw new Error(
+          `This vault was synced with ${parsed.url}. To sync it with another repository, remove the folder ${options.storeDir} first.`,
+        );
+      }
+      state = { ...state, ...parsed, stat: parsed.stat ?? {}, absent: parsed.absent ?? {} };
+    }
   }
 
   // --- What the remote holds now --------------------------------------------
@@ -486,6 +495,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   const seenAs = new Map<string, string>();
   /** The files that the vault holds, whatever is to become of them */
   const present = new Set<string>();
+  /**
+   * Files above the limit that are new by their name, and that are taken for
+   * a tracked file that got another name: one that is gone and had the same
+   * size to the byte. Such a file is too large to read and see what it holds.
+   */
+  const moved = new Map<string, Entry>();
   {
     let gitignore = decode((await fs.read(".gitignore")) ?? new Uint8Array(0));
     const found: string[] = [];
@@ -537,13 +552,26 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
 
     const tooLarge: string[] = [];
+    /** Tracked files that the vault does not hold any more, by the size that they had */
+    const gone = new Map<number, string[]>();
+    for (const path of base.keys()) {
+      const before = state.stat[path];
+      if (!seen.has(path) && before !== undefined) {
+        gone.set(before.size, [...(gone.get(before.size) ?? []), path]);
+      }
+    }
     for (const path of found) {
       const stat = await fs.stat(path);
       if (stat === null) {
         continue;
       }
       if (stat.size > options.maxFileBytes && !base.has(path)) {
-        tooLarge.push(path);
+        const was = gone.get(stat.size)?.shift();
+        if (was !== undefined) {
+          moved.set(path, base.get(was)!);
+        } else {
+          tooLarge.push(path);
+        }
       }
     }
     if (tooLarge.length > 0) {
@@ -567,6 +595,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         continue;
       }
       present.add(path);
+      const known = moved.get(path);
+      if (known !== undefined) {
+        here.set(path, known);
+        stats.set(path, stat);
+        seenAs.set(path, known.oid);
+        continue;
+      }
       const agreed = base.get(path);
       const before = state.stat[path];
       const unchanged =
@@ -861,12 +896,15 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     // --- Give what this device changed --------------------------------------
     // Sending comes first. If the sync stops after it, the next one finds the
     // remote ahead and simply takes what is left to take.
+    /** The ids of the contents that the remote is known to have */
+    const remoteHas = new Set([...there.values()].map((entry) => entry.oid));
     const groups: string[][] = [];
     {
       let group: string[] = [];
       let bytes = 0;
       for (const path of uploads) {
-        const size = stats.get(path)?.size ?? 0;
+        // What the remote has already is not sent, so it does not count
+        const size = remoteHas.has(here.get(path)?.oid ?? "") ? 0 : (stats.get(path)?.size ?? 0);
         if (group.length > 0 && bytes + size > options.batchBytes) {
           groups.push(group);
           group = [];
@@ -890,6 +928,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       const sent: { path: string; entry: Entry; stat: FileStat }[] = [];
       for (const path of group) {
         const stat = await fs.stat(path);
+        const known = moved.get(path);
+        if (known !== undefined && stat !== null && !(await changedSinceScan(path))) {
+          // Too large to read. The remote has what it holds, under the name it had before.
+          target.set(path, known);
+          sent.push({ path, entry: known, stat });
+          continue;
+        }
         const data = stat === null ? null : ((await linkAt(path)) ?? (await fs.read(path)));
         if (stat === null || data === null || data.length > options.maxFileBytes) {
           result.busy.push(path);
@@ -898,7 +943,11 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         const blob: GitObject = { type: "blob", data };
         const entry = { oid: await objectId(blob), mode: here.get(path)!.mode };
         if (!same(entry, target.get(path))) {
-          blobs.push(blob);
+          // What the remote has under another name, as after a file was given a new one, is not sent again
+          if (!remoteHas.has(entry.oid)) {
+            blobs.push(blob);
+            remoteHas.add(entry.oid);
+          }
           target.set(path, entry);
         }
         sent.push({ path, entry, stat });

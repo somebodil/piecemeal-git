@@ -35,6 +35,7 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A name that is a file on one side and a folder on the other is kept on both: what is here keeps the name, and what the remote has goes beside it, as `name (conflict 2026-11-22 0915)`.
 - What the device changed becomes commits on top of the remote, each with about 4 MB of content. The history of the branch stays a line.
 - If another device sends something while a sync runs, the remote refuses what this one sends. The sync then looks at the remote again and goes on from there, up to three times.
+- A file or a folder that gets another name is a removal and a new file to the sync, as it is to git. What it holds is not sent again: the remote has it already.
 - A folder that loses its last file to a sync is removed. One that still holds something, such as a file that is not synced, stays.
 - A file that was changed in the three seconds before a sync is read again by the next one. Its size and time alone would not tell a second change in the same moment.
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
@@ -59,8 +60,9 @@ Files that are too large:
 - Another server is asked for the sizes as git asks for them (`object-info`). Where it answers, batches are made up by the real sizes, and a file above the limit is left out of the vault, and you are told. It cannot come in pieces there. The server that comes with git answers once `transfer.advertiseObjectInfo` is set.
 - A server that does not answer does not tell how large a file is before it sends it, so there a file comes in one piece, however large it is. The size of a file is then guessed from the files of the same kind that came before it, by the ending of its name, and a batch is made up by these guesses. The first file of a kind that is rarely text is asked for by itself.
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
+- A tracked file above the limit that gets another name on the device keeps what the repository has for it, under the new name. It is too large to be read, so it is known by its size: a new file above the limit that has, to the byte, the size of a tracked file that is gone is taken for that file.
 
-The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
+The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
 
 ## Trying it
 

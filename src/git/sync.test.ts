@@ -498,6 +498,73 @@ describe("sync", () => {
     assert.deepEqual([again.downloaded, again.uploaded, again.tooLargeChanged], [[], [], []]);
   });
 
+  it("does not send again what the remote has, when a folder gets another name", async () => {
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 4; i++) {
+      files[`album/photo ${i}.jpg`] = Buffer.from(Array.from({ length: 3_000 }, () => Math.floor(Math.random() * 256)));
+    }
+    const w = setup(files);
+    await w.syncPhone();
+    renameSync(path.join(w.phoneDir, "album"), path.join(w.phoneDir, "photos"));
+    w.writePhone("copy of a photo.jpg", files["album/photo 0.jpg"]);
+    let sent = 0;
+    const result = await w.syncPhone({
+      http: (request) => {
+        if (request.url.endsWith("/git-receive-pack")) {
+          sent += request.body?.length ?? 0;
+        }
+        return nodeHttp(request);
+      },
+    });
+    assert.equal(result.uploaded.length, 5);
+    assert.equal(result.deletedThere.length, 4);
+    // Twelve thousand bytes of photos got new names, and none of them went over the line again
+    assert.ok(sent > 0 && sent < 1_500, `${sent} bytes were sent`);
+    assert.deepEqual(w.pathsThere(), ["copy of a photo.jpg", "photos/photo 0.jpg", "photos/photo 1.jpg", "photos/photo 2.jpg", "photos/photo 3.jpg"]);
+    w.pullPc();
+    assert.deepEqual(readFileSync(path.join(w.pcDir, "photos/photo 3.jpg")), files["album/photo 3.jpg"]);
+    assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+  });
+
+  it("takes a file above the limit that got another name for the file it was", async () => {
+    const w = setup({ "video.mp4": Buffer.alloc(50_000, 7), "a.md": "a\n" });
+    const fs = new NodeFs(w.phoneDir);
+    const largeBlob: SyncOptions["largeBlob"] = async (file, to) => {
+      await fs.write(to, Buffer.alloc(file.size, 7));
+      return true;
+    };
+    await w.syncPhone({ largeBlob });
+    const before = server.git(path.basename(w.url), "rev-parse", "main:video.mp4");
+    mkdirSync(path.join(w.phoneDir, "Attachments"));
+    renameSync(path.join(w.phoneDir, "video.mp4"), path.join(w.phoneDir, "Attachments/holiday.mp4"));
+    const result = await w.syncPhone({ largeBlob });
+    // Neither removed from the remote, nor written into .gitignore as a new file that is too large
+    assert.deepEqual([result.uploaded, result.deletedThere, result.tooLargeIgnored], [["Attachments/holiday.mp4"], ["video.mp4"], []]);
+    assert.deepEqual(w.pathsThere(), ["Attachments/holiday.mp4", "a.md"]);
+    assert.equal(server.git(path.basename(w.url), "rev-parse", "main:Attachments/holiday.mp4"), before);
+    assert.equal(w.readPhone(".gitignore"), null);
+    const again = await w.syncPhone({ largeBlob });
+    assert.deepEqual([again.uploaded, again.downloaded, again.deletedThere, again.tooLargeChanged], [[], [], [], []]);
+    // Another file of another size that is too large is still not sent
+    w.writePhone("other.mp4", Buffer.alloc(50_001, 8));
+    const other = await w.syncPhone({ largeBlob });
+    assert.deepEqual(other.tooLargeIgnored, ["other.mp4"]);
+  });
+
+  it("joins the remote anew when what was agreed on cannot be read", async () => {
+    const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+    await w.syncPhone();
+    writeFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), '{"version":1,"url":"');
+    w.writePhone("a.md", "a of the phone\n");
+    w.writePhone("c.md", "c\n");
+    const result = await w.syncPhone();
+    assert.deepEqual([result.deletedHere, result.deletedThere, result.downloaded], [[], [], ["a (conflict 2026-11-22 0915).md"]]);
+    assert.deepEqual(result.uploaded.sort(), ["a.md", "c.md"]);
+    assert.deepEqual([w.readPhone("a.md"), w.readPhone("b.md")], ["a of the phone\n", "b\n"]);
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded], [[], []]);
+  });
+
   it("keeps the version of the remote when a tracked file grows too large here", async () => {
     const w = setup({ "grows.md": "small\n" });
     await w.syncPhone();
