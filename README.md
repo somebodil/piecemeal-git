@@ -1,12 +1,25 @@
 # Piecemeal Git
 
-Working title. An [Obsidian](https://obsidian.md) plugin that syncs a vault with a git repository, built to work on a phone.
+An [Obsidian](https://obsidian.md) plugin that syncs a vault with a git repository, built to work on a phone.
 
 It speaks the git protocol itself and needs no git program. What sets it apart is that it never holds more than a few megabytes at a time:
 
 - It first asks for the commits and the folders only, and then for the contents of the files in small batches.
 - It keeps no second copy of the files. The vault is the copy.
 - A file that is too large to send from the device is not sent. The plugin writes it into `.gitignore` and tells you.
+
+## Installing
+
+In Obsidian, open the settings, go to "Community plugins", look for "Piecemeal Git", install it and turn it on. Then give it the address of a repository and a token, as told under "Trying it" below.
+
+Try it on a copy of a vault first. It has run on an emulated phone and not yet on one that a person holds in a hand.
+
+## What it sends, and where
+
+- It talks to the server of the repository that you name, and to nothing else, with one exception.
+- For a repository on github.com it also asks `api.github.com` for the sizes of the files and for the parts of files that are too large for one answer. It sends the token there too, since a private repository answers to nothing else.
+- The token is kept in the secret storage of Obsidian. It is not written into the vault and not into the settings of the plugin.
+- It counts nothing and reports nothing to anyone.
 
 ## State
 
