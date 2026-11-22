@@ -2,6 +2,7 @@ import { decode, encode } from "./bytes.ts";
 import { type FileStat, type Fs, join } from "./fs.ts";
 import { type Http } from "./http.ts";
 import { addToBlock, type Verdict, verdict } from "./ignore.ts";
+import { isText, merge3 } from "./merge.ts";
 import {
   type GitObject,
   MODE_EXECUTABLE,
@@ -16,7 +17,7 @@ import {
   type TreeEntry,
 } from "./objects.ts";
 import { parsePack, writePack } from "./pack.ts";
-import { fetchPack, lsRefs, push, type Remote, ZERO_OID } from "./protocol.ts";
+import { fetchPack, lsRefs, push, RejectedError, type Remote, RemoteError, ZERO_OID } from "./protocol.ts";
 import { ObjectStore } from "./store.ts";
 
 /** A file of the remote that is too large to come in one response. */
@@ -55,6 +56,11 @@ export interface SyncOptions {
    * with its letters in one piece, as git does on a Mac.
    */
   composeNames?: boolean;
+  /**
+   * False to never put together what both sides made of a text. The version
+   * of the remote is then always kept beside the one of the vault, as a copy.
+   */
+  mergeText?: boolean;
   /** A file larger than this is neither sent nor asked for in one piece */
   maxFileBytes: number;
   /** Contents of files are asked for, and sent, in batches of about this size */
@@ -74,6 +80,8 @@ export interface SyncResult {
   uploaded: string[];
   deletedHere: string[];
   deletedThere: string[];
+  /** Texts that both sides changed in different places. The vault and the remote now hold both changes. */
+  merged: string[];
   /** Files that both sides changed: this side stays, the other side is kept as a copy */
   conflicts: { path: string; copy: string }[];
   /** New files that were too large to send. They were written into `.gitignore`. */
@@ -117,6 +125,9 @@ interface State {
  * the coarsest clock of a file system that a vault is kept on, and a little more.
  */
 const RACY_MS = 3000;
+
+/** How often a sync starts over because another device moved the branch in the meantime */
+const ATTEMPTS = 3;
 
 /** Endings of names of files that are text, and with that mostly small */
 const TEXT_KINDS = new Set(["md", "txt", "json", "canvas", "base", "css", "js", "ts", "yaml", "yml", "csv", "html", "xml", "svg", ""]);
@@ -230,6 +241,47 @@ function conflictPath(path: string, when: Date, taken: (path: string) => boolean
  * commit on top of the remote, so the history of the branch stays a line.
  */
 export async function sync(options: SyncOptions): Promise<SyncResult> {
+  /** What an attempt did before the remote refused the rest */
+  const done = { uploaded: [] as string[], tooLargeIgnored: [] as string[] };
+  for (let attempt = 1; ; attempt++) {
+    const result = emptyResult();
+    try {
+      await attemptSync(options, result);
+    } catch (error) {
+      // Another device sent something while this one was at it. What the remote
+      // holds now is looked at again, and the sync goes on from there.
+      if (error instanceof RejectedError && attempt < ATTEMPTS) {
+        done.uploaded.push(...result.uploaded);
+        done.tooLargeIgnored.push(...result.tooLargeIgnored);
+        (options.log ?? (() => undefined))("the branch moved while the sync ran, looking at it again");
+        continue;
+      }
+      throw error;
+    }
+    result.uploaded = [...new Set([...done.uploaded, ...result.uploaded])];
+    result.tooLargeIgnored = [...new Set([...done.tooLargeIgnored, ...result.tooLargeIgnored])];
+    return result;
+  }
+}
+
+function emptyResult(): SyncResult {
+  return {
+    commit: null,
+    downloaded: [],
+    uploaded: [],
+    deletedHere: [],
+    deletedThere: [],
+    merged: [],
+    conflicts: [],
+    tooLargeIgnored: [],
+    tooLargeChanged: [],
+    tooLargeThere: [],
+    sameName: [],
+    busy: [],
+  };
+}
+
+async function attemptSync(options: SyncOptions, result: SyncResult): Promise<void> {
   const { fs, http, remote } = options;
   const log = options.log ?? (() => undefined);
   const now = (options.now ?? (() => new Date()))();
@@ -241,20 +293,6 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     path === ".git" ||
     path.startsWith(".git/") ||
     (options.exclude?.(path, isDir) ?? false);
-
-  const result: SyncResult = {
-    commit: null,
-    downloaded: [],
-    uploaded: [],
-    deletedHere: [],
-    deletedThere: [],
-    conflicts: [],
-    tooLargeIgnored: [],
-    tooLargeChanged: [],
-    tooLargeThere: [],
-    sameName: [],
-    busy: [],
-  };
 
   // --- How the vault spells its names ----------------------------------------
   // Most phones and computers take "a.md" and "A.md" for the same file, and git
@@ -399,6 +437,12 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   noteSpelling(there.keys());
   const here = new Map<string, Entry>();
   const stats = new Map<string, FileStat>();
+  /**
+   * The id of what a file held when its size and time were taken. They are
+   * noted for the next sync only if that is what was agreed on: a change that
+   * could not be sent must not look like no change the next time.
+   */
+  const seenAs = new Map<string, string>();
   /** The files that the vault holds, whatever is to become of them */
   const present = new Set<string>();
   {
@@ -508,6 +552,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         here.set(path, { oid, mode: agreed !== undefined && isFile(agreed) ? agreed.mode : MODE_FILE });
       }
       stats.set(path, stat);
+      seenAs.set(path, here.get(path)!.oid);
     }
     // What is tracked but not in the vault on purpose counts as unchanged
     for (const [path, entry] of base) {
@@ -537,6 +582,25 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   const uploads: string[] = [];
   const removeHere: string[] = [];
   const paths = new Set([...base.keys(), ...here.keys(), ...there.keys()]);
+  /** Files that both sides changed, and that may be texts that can be put together */
+  const bothChanged: { path: string; b: Entry; h: Entry; t: Entry }[] = [];
+  /** Keeps the version of the vault under the name, and puts the one of the remote beside it. */
+  const keepBoth = (path: string, theirs: Entry): void => {
+    const copy = conflictPath(path, now, (p) => paths.has(p) || target.has(p));
+    target.set(copy, theirs);
+    downloads.push({ path: copy, entry: theirs, from: path });
+    uploads.push(path);
+    result.conflicts.push({ path, copy });
+  };
+  /** True if a file is no longer what the scan saw. Such a file is left for the next sync. */
+  const changedSinceScan = async (path: string): Promise<boolean> => {
+    const seen = stats.get(path);
+    const stat = await fs.stat(path);
+    if (seen === undefined || stat === null) {
+      return (seen === undefined) !== (stat === null);
+    }
+    return seen.size !== stat.size || seen.mtime !== stat.mtime;
+  };
   for (const path of paths) {
     if (excluded(path, false)) {
       // Never synced: whatever the remote has under this name stays there, and is not taken
@@ -580,13 +644,71 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     } else if (t === undefined) {
       // Changed here, removed there: the change wins
       uploads.push(path);
+    } else if (options.mergeText !== false && b !== undefined && isFile(b) && isFile(h) && isFile(t)) {
+      bothChanged.push({ path, b, h, t });
     } else {
-      const copy = conflictPath(path, now, (p) => paths.has(p) || target.has(p));
-      target.set(copy, t);
-      downloads.push({ path: copy, entry: t, from: path });
-      uploads.push(path);
-      result.conflicts.push({ path, copy });
+      keepBoth(path, t);
     }
+  }
+
+  // --- A text that both sides changed ----------------------------------------
+  // As git does it: what the two sides changed in different places of a text
+  // is put together, line by line. The device keeps no contents of what was
+  // agreed on, so the remote is asked for the text as it was. Where that does
+  // not work out, the version of the remote goes beside the one of the vault.
+  for (const { path, b, h, t } of bothChanged) {
+    const stat = stats.get(path);
+    const ours = stat === undefined || stat.size > options.batchBytes ? null : await fs.read(path);
+    if (ours === null || !isText(ours)) {
+      // Too large for one request, or not a text
+      keepBoth(path, t);
+      continue;
+    }
+    if ((await objectId({ type: "blob", data: ours })) !== h.oid) {
+      result.busy.push(path);
+      continue;
+    }
+    let both: Uint8Array | null = null;
+    let theirs: Uint8Array | undefined;
+    try {
+      const fetched = await fetchPack(http, remote, { wants: [b.oid, t.oid] });
+      const byOid = new Map((await parsePack(fetched.pack)).map((object) => [object.oid, object.data]));
+      const was = byOid.get(b.oid);
+      theirs = byOid.get(t.oid);
+      if (was !== undefined && theirs !== undefined) {
+        both = merge3(was, ours, theirs);
+      }
+    } catch (error) {
+      // A remote that no longer has the text as it was, after its history was rewritten
+      if (!(error instanceof RemoteError) || error instanceof RejectedError) {
+        throw error;
+      }
+    }
+    if (both === null) {
+      keepBoth(path, t);
+      continue;
+    }
+    const entry: Entry = { oid: await objectId({ type: "blob", data: both }), mode: h.mode !== b.mode ? h.mode : t.mode };
+    if (await changedSinceScan(path)) {
+      result.busy.push(path);
+      continue;
+    }
+    if (entry.oid !== h.oid) {
+      await fs.write(path, both);
+      const written = await fs.stat(path);
+      if (written !== null) {
+        stats.set(path, written);
+      }
+    }
+    here.set(path, entry);
+    seenAs.set(path, entry.oid);
+    if (same(entry, t)) {
+      // What this side changed, the remote changed too, and more
+      agreed.set(path, entry);
+    } else {
+      uploads.push(path);
+    }
+    result.merged.push(path);
   }
 
   // --- A name that is a file on one side and a folder on the other ----------
@@ -669,7 +791,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         if (size !== undefined) {
           next.large![path] = size;
         }
-      } else if (stat !== undefined) {
+      } else if (stat !== undefined && seenAs.get(path) === agreed.get(path)!.oid) {
         next.stat[path] = stat;
         if (stat.mtime > racyAfter) {
           next.racy![path] = true;
@@ -677,16 +799,6 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       }
     }
     await fs.write(statePath, encode(JSON.stringify(next)));
-  };
-
-  /** True if a file is no longer what the scan saw. Such a file is left for the next sync. */
-  const changedSinceScan = async (path: string): Promise<boolean> => {
-    const seen = stats.get(path);
-    const stat = await fs.stat(path);
-    if (seen === undefined || stat === null) {
-      return (seen === undefined) !== (stat === null);
-    }
-    return seen.size !== stat.size || seen.mtime !== stat.mtime;
   };
 
   try {
@@ -764,6 +876,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       for (const { path, entry, stat } of sent) {
         agreed.set(path, entry);
         stats.set(path, stat);
+        seenAs.set(path, entry.oid);
         absent.delete(path);
         result.uploaded.push(path);
       }
@@ -885,6 +998,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);
+              seenAs.set(path, entry.oid);
             }
             settle(path, entry, false);
             result.downloaded.push(path);
@@ -952,6 +1066,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
             const stat = await fs.stat(path);
             if (stat !== null) {
               stats.set(path, stat);
+              seenAs.set(path, entry.oid);
             }
             settle(path, entry, false);
             result.downloaded.push(path);
@@ -974,5 +1089,4 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     await saveState();
   }
   result.commit = tip;
-  return result;
 }

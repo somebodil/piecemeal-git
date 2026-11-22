@@ -17,6 +17,8 @@ interface Settings {
   device: string;
   /** A file larger than this many megabytes is not sent from this device */
   maxFileMB: number;
+  /** What both sides changed in different places of a text is put together, as git does */
+  mergeText: boolean;
   /** A sync starts by itself every so many minutes. 0 for never. */
   everyMinutes: number;
   /** A sync starts by itself when Obsidian has opened the vault */
@@ -31,6 +33,7 @@ const DEFAULTS: Settings = {
   authorEmail: "",
   device: "",
   maxFileMB: 20,
+  mergeText: true,
   everyMinutes: 0,
   onStart: false,
 };
@@ -53,6 +56,11 @@ function summary(result: SyncResult): [string, boolean] {
       ? "Nothing to sync."
       : `Synced: ${result.downloaded.length + result.deletedHere.length} taken, ${result.uploaded.length + result.deletedThere.length} sent.`,
   ];
+  if (result.merged.length > 0) {
+    lines.push(`Changed on both sides, and put together: ${list(result.merged)}.`);
+  }
+  // Up to here it is worth reading, and nothing that has to be done something about
+  const told = lines.length;
   if (result.conflicts.length > 0) {
     lines.push(
       `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. Your version stays, the other one is kept beside it as a copy.`,
@@ -75,7 +83,7 @@ function summary(result: SyncResult): [string, boolean] {
   if (result.busy.length > 0) {
     lines.push(`Changed while the sync ran, left for the next one: ${list(result.busy)}.`);
   }
-  return [lines.join("\n"), lines.length > 1];
+  return [lines.join("\n"), lines.length > told];
 }
 
 export default class PiecemealGitPlugin extends Plugin {
@@ -137,7 +145,7 @@ export default class PiecemealGitPlugin extends Plugin {
       }
       return null;
     }
-    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB } = this.config;
+    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText } = this.config;
     if (url === "") {
       if (!unasked) {
         new Notice("Give the address of the repository in the settings first.");
@@ -167,13 +175,14 @@ export default class PiecemealGitPlugin extends Plugin {
         message: () => `Sync from ${from}`,
         // An iPhone, an iPad and a Mac keep the letters of a name like "한글.md" in parts
         composeNames: Platform.isIosApp || Platform.isMacOS,
+        mergeText,
         maxFileBytes: maxFileMB * MB,
         batchBytes: BATCH_BYTES,
         sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
         largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
       });
       const [text, attention] = summary(result);
-      const taken = result.downloaded.length + result.deletedHere.length;
+      const taken = result.downloaded.length + result.deletedHere.length + result.merged.length;
       if (!unasked || attention || taken > 0) {
         new Notice(text, attention ? 0 : 5000);
       }
@@ -197,7 +206,7 @@ type Row = { name: string; desc?: string } & (
   | { type: "text"; key: "url" | "branch" | "authorName" | "authorEmail" | "device"; placeholder: string }
   | { type: "secret"; key: "tokenSecret" }
   | { type: "number"; key: "maxFileMB" | "everyMinutes"; min: number }
-  | { type: "toggle"; key: "onStart" }
+  | { type: "toggle"; key: "onStart" | "mergeText" }
 );
 
 const ROWS: Row[] = [
@@ -215,6 +224,12 @@ const ROWS: Row[] = [
     name: "Largest file to send",
     desc: "In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told. A file of the repository that was left out for its size comes once this lets it in.",
     min: 1,
+  },
+  {
+    type: "toggle",
+    key: "mergeText",
+    name: "Put texts together",
+    desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, your version stays and the other one is kept beside it as a copy.",
   },
   {
     type: "number",

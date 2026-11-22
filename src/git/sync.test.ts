@@ -198,6 +198,133 @@ describe("sync", () => {
     assert.equal(w.log().length, 3);
   });
 
+  it("puts together what both sides changed in different places of a text", async () => {
+    const text = (second: string, last: string): string => `# Title\n${second}\nthree\nfour\nfive\n${last}\n`;
+    const w = setup({ "note.md": text("two", "six"), "한글.md": text("둘", "여섯") });
+    await w.syncPhone();
+    w.writePc("note.md", text("two from the computer", "six"));
+    w.writePc("한글.md", text("컴퓨터가 고친 둘", "여섯"));
+    w.pushPc();
+    w.writePhone("note.md", text("two", "six from the phone"));
+    w.writePhone("한글.md", text("둘", "폰이 고친 여섯"));
+    const result = await w.syncPhone();
+
+    assert.deepEqual([result.merged.sort(), result.conflicts, result.downloaded], [["note.md", "한글.md"], [], []]);
+    assert.deepEqual(result.uploaded.sort(), ["note.md", "한글.md"]);
+    assert.equal(w.readPhone("note.md"), text("two from the computer", "six from the phone"));
+    assert.equal(w.readPhone("한글.md"), text("컴퓨터가 고친 둘", "폰이 고친 여섯"));
+    assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "note.md", "한글.md"]);
+    w.pullPc();
+    assert.equal(w.readPc("note.md"), text("two from the computer", "six from the phone"));
+    assert.equal(w.readPc("한글.md"), text("컴퓨터가 고친 둘", "폰이 고친 여섯"));
+    assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+
+    const again = await w.syncPhone();
+    assert.deepEqual([again.merged, again.downloaded, again.uploaded], [[], [], []]);
+  });
+
+  it("takes the text of the remote when it holds the change of the vault too", async () => {
+    const w = setup({ "note.md": "one\ntwo\nthree\nfour\nfive\n" });
+    await w.syncPhone();
+    w.writePc("note.md", "ONE\ntwo\nthree\nfour\nFIVE\n");
+    w.pushPc();
+    w.writePhone("note.md", "ONE\ntwo\nthree\nfour\nfive\n");
+    const result = await w.syncPhone();
+    assert.deepEqual([result.merged, result.uploaded, result.conflicts], [["note.md"], [], []]);
+    assert.equal(w.readPhone("note.md"), "ONE\ntwo\nthree\nfour\nFIVE\n");
+    assert.deepEqual(w.log(), ["from the computer", "first"]);
+    const again = await w.syncPhone();
+    assert.deepEqual([again.merged, again.downloaded, again.uploaded], [[], [], []]);
+  });
+
+  it("keeps both versions of what is not a text, and of a text when it is told not to put texts together", async () => {
+    const image = (byte: number): Buffer => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, byte, 10, 1, 10, 2, 10]);
+    const w = setup({ "image.png": image(1), "note.md": "one\ntwo\nthree\nfour\n" });
+    await w.syncPhone();
+    w.writePc("image.png", image(2));
+    w.writePc("note.md", "ONE\ntwo\nthree\nfour\n");
+    w.pushPc();
+    w.writePhone("image.png", image(3));
+    w.writePhone("note.md", "one\ntwo\nthree\nFOUR\n");
+    const result = await w.syncPhone({ mergeText: false });
+    assert.deepEqual(result.merged, []);
+    assert.deepEqual(result.conflicts.map((c) => c.path).sort(), ["image.png", "note.md"]);
+    assert.equal(w.readPhone("note.md"), "one\ntwo\nthree\nFOUR\n");
+    assert.equal(w.readPhone("note (conflict 2026-11-22 0915).md"), "ONE\ntwo\nthree\nfour\n");
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image.png")), image(3));
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image (conflict 2026-11-22 0915).png")), image(2));
+
+    // The same with texts put together: the image still gets its copy
+    w.pullPc();
+    w.writePc("image.png", image(4));
+    w.pushPc();
+    w.writePhone("image.png", image(5));
+    const second = await w.syncPhone();
+    assert.deepEqual([second.merged, second.conflicts.map((c) => c.path)], [[], ["image.png"]]);
+  });
+
+  it("puts a text together again after a sync that stopped before it sent the result", async () => {
+    const w = setup({ "note.md": "one\ntwo\nthree\nfour\nfive\n" });
+    await w.syncPhone();
+    w.writePc("note.md", "ONE\ntwo\nthree\nfour\nfive\n");
+    w.pushPc();
+    w.writePhone("note.md", "one\ntwo\nthree\nfour\nFIVE\n");
+    await assert.rejects(
+      w.syncPhone({
+        http: (request) => (request.url.endsWith("/git-receive-pack") ? Promise.reject(new Error("no network")) : nodeHttp(request)),
+      }),
+      /no network/,
+    );
+    assert.equal(w.readPhone("note.md"), "ONE\ntwo\nthree\nfour\nFIVE\n");
+    const result = await w.syncPhone();
+    assert.deepEqual([result.merged, result.uploaded, result.conflicts], [["note.md"], ["note.md"], []]);
+    w.pullPc();
+    assert.equal(w.readPc("note.md"), "ONE\ntwo\nthree\nfour\nFIVE\n");
+  });
+
+  it("sends a change with the next sync when the one before failed while it sent", async () => {
+    const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+    await w.syncPhone();
+    w.writePhone("a.md", "a from the phone\n");
+    w.removePhone("b.md");
+    w.writePhone("new.md", "new\n");
+    await assert.rejects(
+      w.syncPhone({
+        http: (request) => (request.url.endsWith("/git-receive-pack") ? Promise.reject(new Error("no network")) : nodeHttp(request)),
+      }),
+      /no network/,
+    );
+    const result = await w.syncPhone();
+    assert.deepEqual([result.uploaded.sort(), result.deletedThere], [["a.md", "new.md"], ["b.md"]]);
+    w.pullPc();
+    assert.deepEqual([w.readPc("a.md"), w.readPc("b.md"), w.readPc("new.md")], ["a from the phone\n", null, "new\n"]);
+  });
+
+  it("starts over when another device sent something while the sync ran", async () => {
+    const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+    await w.syncPhone();
+    w.writePhone("a.md", "a from the phone\n");
+    let pushes = 0;
+    const result = await w.syncPhone({
+      http: (request) => {
+        if (request.url.endsWith("/git-receive-pack") && ++pushes === 1) {
+          // The computer is a moment faster
+          w.writePc("b.md", "b from the computer\n");
+          w.pushPc();
+        }
+        return nodeHttp(request);
+      },
+    });
+    assert.equal(pushes, 2);
+    assert.deepEqual([result.uploaded, result.downloaded], [["a.md"], ["b.md"]]);
+    assert.equal(w.readPhone("b.md"), "b from the computer\n");
+    assert.deepEqual(w.log(), ["from the phone", "from the computer", "first"]);
+    w.pullPc();
+    assert.equal(w.readPc("a.md"), "a from the phone\n");
+    // The commit that was refused stays on the server until it tidies up, and nothing points to it
+    assert.match(server.git(path.basename(w.url), "fsck", "--strict"), /^dangling commit [0-9a-f]{40}$/);
+  });
+
   it("lets a change win over a removal, on either side", async () => {
     const w = setup({ "x.md": "x\n", "y.md": "y\n" });
     await w.syncPhone();
