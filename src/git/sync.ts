@@ -17,7 +17,7 @@ import {
   type TreeEntry,
 } from "./objects.ts";
 import { parsePack, writePack } from "./pack.ts";
-import { fetchPack, lsRefs, push, RejectedError, type Remote, RemoteError, ZERO_OID } from "./protocol.ts";
+import { capabilities, fetchPack, lsRefs, objectSizes, push, RejectedError, type Remote, RemoteError, ZERO_OID } from "./protocol.ts";
 import { ObjectStore } from "./store.ts";
 
 /** A file of the remote that is too large to come in one response. */
@@ -65,7 +65,11 @@ export interface SyncOptions {
   maxFileBytes: number;
   /** Contents of files are asked for, and sent, in batches of about this size */
   batchBytes: number;
-  /** The sizes of the files under a tree, by their ids, if the host can tell */
+  /**
+   * The sizes of the files under a tree, by their ids, if the host has a way
+   * of its own to tell. Without it the server is asked as git would ask, which
+   * works where the server offers it.
+   */
   sizes?: (treeOid: string) => Promise<Map<string, number>>;
   /** Gets a file that is too large for one response and writes it to `path` in the vault. False if it cannot. */
   largeBlob?: (file: LargeFile, path: string) => Promise<boolean>;
@@ -917,7 +921,24 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       // Asked for when the first file needs it. A sync that only looks again at files that stay out asks nothing.
       let sizes: Map<string, number> | null = null;
       const sizeOf = async (oid: string): Promise<number | undefined> => {
-        sizes ??= (thereRoot !== null ? await options.sizes?.(thereRoot) : undefined) ?? new Map<string, number>();
+        if (sizes === null) {
+          if (options.sizes !== undefined) {
+            sizes = thereRoot === null ? new Map<string, number>() : await options.sizes(thereRoot);
+          } else {
+            // Git has a way to ask for sizes too, and a server says if it offers it. Few do.
+            sizes = new Map<string, number>();
+            try {
+              if ((await capabilities(http, remote)).has("object-info")) {
+                const oids = new Set(downloads.filter(({ entry }) => isFile(entry)).map(({ entry }) => entry.oid));
+                sizes = await objectSizes(http, remote, [...oids]);
+              }
+            } catch (error) {
+              if (!(error instanceof RemoteError)) {
+                throw error;
+              }
+            }
+          }
+        }
         return sizes.get(oid);
       };
       /** The paths that wait for the content with an id */

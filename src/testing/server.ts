@@ -17,6 +17,8 @@ export class TestServer {
   private port = 0;
   /** Sizes of the bodies that the server sent, to see that responses stay small */
   readonly responseSizes: number[] = [];
+  /** A name and a password as "name:password". When set, a request without them is turned away. */
+  credentials: string | null = null;
   /** Told about every request that was answered */
   onResponse: ((method: string, path: string, status: number, bytes: number) => void) | null = null;
 
@@ -89,10 +91,16 @@ export class TestServer {
     rmSync(index, { force: true });
   }
 
-  /** Makes an empty repository that the server serves, and returns its address. */
-  createRepo(name: string): string {
+  /**
+   * Makes an empty repository that the server serves, and returns its address.
+   * @param tellsSizes true for a server that tells the sizes of objects when asked, which git can but few hosts let it
+   */
+  createRepo(name: string, tellsSizes = false): string {
     this.git(".", "init", "-q", "--bare", "-b", "main", `${name}.git`);
     const dir = `${name}.git`;
+    if (tellsSizes) {
+      this.git(dir, "config", "transfer.advertiseObjectInfo", "true");
+    }
     this.git(dir, "config", "http.receivepack", "true");
     this.git(dir, "config", "uploadpack.allowFilter", "true");
     this.git(dir, "config", "uploadpack.allowAnySHA1InWant", "true");
@@ -112,6 +120,13 @@ export class TestServer {
       request.on("end", () => {
         const url = new URL(request.url ?? "/", "http://localhost");
         const body = Buffer.concat(chunks);
+        if (this.credentials !== null && request.headers.authorization !== `Basic ${Buffer.from(this.credentials).toString("base64")}`) {
+          this.onResponse?.(request.method ?? "GET", url.pathname, 401, 0);
+          response.statusCode = 401;
+          response.setHeader("WWW-Authenticate", 'Basic realm="git"');
+          response.end();
+          return;
+        }
         const child = spawn("git", ["http-backend"], {
           env: {
             ...process.env,

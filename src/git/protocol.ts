@@ -6,10 +6,36 @@ const AGENT = "agent=piecemeal-git/0.1";
 export const ZERO_OID = "0".repeat(40);
 
 export interface Remote {
-  /** The address of the repository, as `git clone` takes it over HTTPS */
+  /** The address of the repository, as `git clone` takes it over HTTPS, without a name or a password in it */
   url: string;
-  /** A token that may read and write the repository */
+  /** A token that may read and write the repository, or a password */
   token?: string;
+  /** The name that goes with the token. Without it, the one that GitHub and GitLab take with any token. */
+  username?: string;
+}
+
+/**
+ * A remote from an address as a person gives it. A name before the host, as
+ * in `https://someone@host/vault.git`, is the name that goes with the token:
+ * some hosts want the name of the account there. A password in the address
+ * is used if there is no token.
+ */
+export function remoteOf(address: string, token?: string): Remote {
+  let parsed: URL;
+  try {
+    parsed = new URL(address);
+  } catch {
+    return { url: address, token };
+  }
+  const username = parsed.username === "" ? undefined : decodeURIComponent(parsed.username);
+  const password = parsed.password === "" ? undefined : decodeURIComponent(parsed.password);
+  if (username === undefined && password === undefined) {
+    return { url: address, token };
+  }
+  const at = address.indexOf("@");
+  const url = address.slice(0, address.indexOf("//") + 2) + address.slice(at + 1);
+  const secret = token !== undefined && token !== "" ? token : password;
+  return username === undefined ? { url, token: secret } : { url, token: secret, username };
 }
 
 export class RemoteError extends Error {
@@ -28,7 +54,9 @@ function headers(remote: Remote, extra: Record<string, string>): Record<string, 
     ...extra,
   };
   if (remote.token !== undefined && remote.token !== "") {
-    out["Authorization"] = `Basic ${btoa(`x-access-token:${remote.token}`)}`;
+    // The letters go as UTF-8, as git and curl send them
+    const pair = encode(`${remote.username ?? "x-access-token"}:${remote.token}`);
+    out["Authorization"] = `Basic ${btoa(Array.from(pair, (byte) => String.fromCharCode(byte)).join(""))}`;
   }
   return out;
 }
@@ -37,9 +65,10 @@ function base(remote: Remote): string {
   return remote.url.replace(/\/+$/, "");
 }
 
-function check(response: HttpResponse, what: string): void {
+function check(response: HttpResponse, what: string, remote: Remote): void {
   if (response.status === 401 || response.status === 403) {
-    throw new RemoteError(`${what}: the server refuses the token (${response.status})`, response.status);
+    const reason = remote.token === undefined || remote.token === "" ? "the server wants a token" : "the server refuses the token";
+    throw new RemoteError(`${what}: ${reason} (${response.status})`, response.status);
   }
   if (response.status === 404) {
     throw new RemoteError(`${what}: no such repository, or the token may not see it`, 404);
@@ -60,8 +89,69 @@ async function uploadPack(http: Http, remote: Remote, lines: Uint8Array[]): Prom
     }),
     body: concat(lines),
   });
-  check(response, "fetch");
+  check(response, "fetch", remote);
   return response.body;
+}
+
+/**
+ * What the server can do, by name, as it tells before anything is asked of
+ * it. Some come with a value, such as "fetch" with "shallow filter".
+ */
+export async function capabilities(http: Http, remote: Remote): Promise<Map<string, string>> {
+  const response = await http({
+    url: `${base(remote)}/info/refs?service=git-upload-pack`,
+    method: "GET",
+    headers: headers(remote, { "Git-Protocol": "version=2" }),
+  });
+  check(response, "fetch", remote);
+  const out = new Map<string, string>();
+  for (const packet of readPkts(response.body)) {
+    if (packet.type !== "data") {
+      continue;
+    }
+    const line = lineText(packet.data);
+    // A server that does not speak version 2 starts with "# service=", and tells nothing of use here
+    if (line.startsWith("#")) {
+      return new Map();
+    }
+    const equals = line.indexOf("=");
+    out.set(equals < 0 ? line : line.slice(0, equals), equals < 0 ? "" : line.slice(equals + 1));
+  }
+  return out;
+}
+
+/** How many objects one request asks the size of */
+const SIZES_PER_REQUEST = 2000;
+
+/**
+ * The sizes of objects, by their ids, on a server that tells "object-info"
+ * among what it can do. An object that the server does not have is left out.
+ */
+export async function objectSizes(http: Http, remote: Remote, oids: string[]): Promise<Map<string, number>> {
+  const sizes = new Map<string, number>();
+  for (let start = 0; start < oids.length; start += SIZES_PER_REQUEST) {
+    const body = await uploadPack(http, remote, [
+      pkt("command=object-info\n"),
+      pkt(`${AGENT}\n`),
+      pkt("object-format=sha1\n"),
+      DELIM,
+      pkt("size\n"),
+      ...oids.slice(start, start + SIZES_PER_REQUEST).map((oid) => pkt(`oid ${oid}\n`)),
+      FLUSH,
+    ]);
+    for (const packet of readPkts(body)) {
+      if (packet.type !== "data") {
+        continue;
+      }
+      const line = lineText(packet.data);
+      throwIfError(line);
+      const [oid, size] = line.split(" ");
+      if (oid.length === 40 && size !== undefined && /^\d+$/.test(size)) {
+        sizes.set(oid, Number(size));
+      }
+    }
+  }
+  return sizes;
 }
 
 function throwIfError(line: string): void {
@@ -222,7 +312,7 @@ export async function push(http: Http, remote: Remote, options: PushOptions): Pr
     }),
     body: concat([pkt(encode(command)), FLUSH, options.pack]),
   });
-  check(response, "push");
+  check(response, "push", remote);
   let unpacked = false;
   let accepted = false;
   for (const packet of readPkts(response.body)) {

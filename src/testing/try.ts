@@ -5,6 +5,7 @@
 import { mkdirSync } from "node:fs";
 import { githubLargeBlob, githubSizes, parseGitHub } from "../git/github.ts";
 import { type Http } from "../git/http.ts";
+import { remoteOf } from "../git/protocol.ts";
 import { sync } from "../git/sync.ts";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
 
@@ -38,13 +39,14 @@ const http: Http = async (request) => {
 };
 
 const fs = new NodeFs(dir);
-const github = parseGitHub(url);
+const remote = remoteOf(url, token);
+const github = parseGitHub(remote.url);
 const MB = 1024 * 1024;
 const started = Date.now();
 const result = await sync({
   fs,
   http,
-  remote: { url, token },
+  remote,
   storeDir: ".piecemeal",
   author: { name: "Piecemeal Git", email: "piecemeal@example.com" },
   message: (when) => `vault sync ${when.toISOString()}`,
@@ -66,6 +68,7 @@ console.log(
       uploaded: result.uploaded.length,
       deletedHere: result.deletedHere.length,
       deletedThere: result.deletedThere.length,
+      merged: result.merged,
       conflicts: result.conflicts,
       tooLargeIgnored: result.tooLargeIgnored,
       tooLargeChanged: result.tooLargeChanged,

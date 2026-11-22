@@ -43,8 +43,9 @@ The device keeps no commits of its own. A sync compares three things for each pa
 Files that are too large:
 
 - A new file above the limit (20 MB unless you change it) is not sent. Its path is written into a part of `.gitignore` that the plugin keeps, between two marker lines, and you are told. The file stays in the vault.
-- A file of the repository above the limit is asked for in ranges of bytes and written piece by piece. The pieces are added up to the id that git gives the file, and a file with another id is not put into the vault. This works on GitHub. Another host does not tell how large a file is before it sends it, so there the file comes in one piece, however large it is.
-- On such a host the size of a file is guessed from the files of the same kind that came before it, by the ending of its name, and a batch is made up by these guesses. The first file of a kind that is rarely text is asked for by itself.
+- A file of the repository above the limit is asked for in ranges of bytes and written piece by piece. The pieces are added up to the id that git gives the file, and a file with another id is not put into the vault. This works on GitHub, which has a way of its own to tell sizes and to give a part of a file.
+- Another server is asked for the sizes as git asks for them (`object-info`). Where it answers, batches are made up by the real sizes, and a file above the limit is left out of the vault, and you are told. It cannot come in pieces there. The server that comes with git answers once `transfer.advertiseObjectInfo` is set.
+- A server that does not answer does not tell how large a file is before it sends it, so there a file comes in one piece, however large it is. The size of a file is then guessed from the files of the same kind that came before it, by the ending of its name, and a batch is made up by these guesses. The first file of a kind that is rarely text is asked for by itself.
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 
 The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
@@ -63,6 +64,8 @@ For a phone to sync with a repository on your computer, with no host and no toke
 
 In Obsidian: build, then copy `main.js` and `manifest.json` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. Then run the command "Sync with the repository".
 
+The token goes to the server as git sends it, as a password. GitHub and GitLab take it under any name. A host that wants the name of your account with it gets the name from the address: `https://name@host/you/vault.git`.
+
 A sync can also start by itself: every so many minutes, and when Obsidian has opened the vault. Both are in the settings and are off at first. Such a sync says nothing while it runs. Afterwards it tells you only that it took something, that something asks for your attention, or that it failed, and a failure is said once and not every few minutes.
 
 The files that Obsidian keeps for one device, `workspace.json` and `workspace-mobile.json` in its settings folder, change whenever you open a note. Put them into `.gitignore`, or every sync sends them.
@@ -75,7 +78,7 @@ Try it on a copy of a vault first.
 - A device that keeps the letters of a name apart cannot hold two files whose names differ in this only. The second one is left out of the vault, like one that differs in capital letters only.
 - Links and repositories inside the repository are left alone: they stay in the repository and are not made in the vault.
 - A file above the limit that is changed twice in the same moment, to the same size, is not seen as changed. It is too large to read again.
-- On a host other than GitHub the sizes of files are not known before they come, so a batch can be larger than meant, and a file above the limit comes whole. The git protocol has a way to ask for sizes, `object-info`, but none of GitHub, GitLab and Codeberg offers it.
+- GitLab and Codeberg do not answer when git asks for sizes, and have no way that the plugin knows to give a part of a file. So there a batch can be larger than meant, and a file above the limit comes whole.
 
 ## Development
 

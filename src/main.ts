@@ -1,5 +1,6 @@
 import { type App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, type SettingDefinitionItem } from "obsidian";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
+import { remoteOf } from "./git/protocol.ts";
 import { sync, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 
@@ -157,13 +158,14 @@ export default class PiecemealGitPlugin extends Plugin {
     try {
       const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
       const fs = new ObsidianFs(this.app.vault.adapter);
-      const github = parseGitHub(url);
+      const remote = remoteOf(url, token);
+      const github = parseGitHub(remote.url);
       const ownData = `${this.app.vault.configDir}/plugins/${this.manifest.id}/data.json`;
       const from = device !== "" ? device : Platform.isMobile ? "a phone" : "a computer";
       const result = await sync({
         fs,
         http: obsidianHttp,
-        remote: { url, token },
+        remote,
         branch: branch === "" ? undefined : branch,
         storeDir: STORE_DIR,
         // The settings of this plugin stay on the device, and so does the trash of Obsidian
@@ -215,7 +217,7 @@ const ROWS: Row[] = [
     type: "secret",
     key: "tokenSecret",
     name: "Token",
-    desc: "A token that may read and write the contents of this one repository. It is kept in the secret storage of Obsidian, not in the vault.",
+    desc: "A token that may read and write the contents of this one repository. It is kept in the secret storage of Obsidian, not in the vault. If the host wants the name of your account with it, put the name into the address: https://name@host/you/vault.git",
   },
   { type: "text", key: "branch", name: "Branch", desc: "Leave empty for the branch that the repository opens with.", placeholder: "main" },
   {

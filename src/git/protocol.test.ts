@@ -7,7 +7,7 @@ import { TestServer } from "../testing/server.ts";
 import { encode } from "./bytes.ts";
 import { objectId, parseCommit, parseTree, serializeCommit, serializeTree, signature } from "./objects.ts";
 import { parsePack, writePack } from "./pack.ts";
-import { fetchPack, lsRefs, push, RejectedError, ZERO_OID } from "./protocol.ts";
+import { capabilities, fetchPack, lsRefs, objectSizes, push, RejectedError, remoteOf, ZERO_OID } from "./protocol.ts";
 
 describe("the git protocol against a real server", () => {
   const server = new TestServer();
@@ -104,5 +104,39 @@ describe("the git protocol against a real server", () => {
     );
     await push(nodeHttp, { url }, { ref: "refs/heads/other", oldOid: ZERO_OID, newOid, pack });
     assert.equal(server.git("one.git", "rev-parse", "other"), newOid);
+  });
+
+  it("reads what the server can do, and the sizes of objects where it tells them", async () => {
+    assert.equal((await capabilities(nodeHttp, { url })).get("fetch")?.includes("filter"), true);
+    assert.equal((await capabilities(nodeHttp, { url })).has("object-info"), false);
+    server.git("one.git", "config", "transfer.advertiseObjectInfo", "true");
+    assert.equal((await capabilities(nodeHttp, { url })).has("object-info"), true);
+    const blobs = server
+      .git("one.git", "ls-tree", "-r", "-l", "main")
+      .split("\n")
+      .map((line) => /^\d+ blob ([0-9a-f]{40}) +(\d+)\t/.exec(line)!);
+    const sizes = await objectSizes(nodeHttp, { url }, [...blobs.map((match) => match[1]), "1".repeat(40)]);
+    assert.deepEqual([...sizes].sort(), blobs.map((match) => [match[1], Number(match[2])]).sort());
+  });
+});
+
+describe("the address of a repository", () => {
+  it("is taken as it is when it names nobody", () => {
+    assert.deepEqual(remoteOf("https://github.com/you/vault.git", "t"), { url: "https://github.com/you/vault.git", token: "t" });
+    assert.deepEqual(remoteOf("not an address", "t"), { url: "not an address", token: "t" });
+  });
+
+  it("gives the name that goes with the token, and never keeps a password", () => {
+    assert.deepEqual(remoteOf("https://someone@host.example/you/vault.git", "t"), {
+      url: "https://host.example/you/vault.git",
+      token: "t",
+      username: "someone",
+    });
+    assert.deepEqual(remoteOf("http://some%20one:pass%40word@host.example:3000/vault.git"), {
+      url: "http://host.example:3000/vault.git",
+      token: "pass@word",
+      username: "some one",
+    });
+    assert.deepEqual(remoteOf("https://someone:password@host.example/vault.git", "t").token, "t");
   });
 });

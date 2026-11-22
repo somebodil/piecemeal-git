@@ -7,6 +7,7 @@ import { CaseBlindFs } from "../testing/case-blind-fs.ts";
 import { DecomposingFs } from "../testing/decomposing-fs.ts";
 import { TestServer } from "../testing/server.ts";
 import { BLOCK_START } from "./ignore.ts";
+import { remoteOf } from "./protocol.ts";
 import { sync, type SyncOptions, type SyncResult } from "./sync.ts";
 
 describe("sync", () => {
@@ -22,9 +23,9 @@ describe("sync", () => {
   });
 
   /** A repository on the server, a clone of it made by git that plays the computer, and an empty vault that plays the phone. */
-  function setup(files: Record<string, string | Buffer> = {}) {
+  function setup(files: Record<string, string | Buffer> = {}, tellsSizes = false) {
     const name = `repo${++counter}`;
-    const url = server.createRepo(name);
+    const url = server.createRepo(name, tellsSizes);
     const pc = `${name}-pc`;
     server.cloneWithGit(name, pc);
     const pcDir = path.join(server.root, pc);
@@ -417,6 +418,46 @@ describe("sync", () => {
     for (const file of Object.keys(files)) {
       assert.equal(server.git(path.basename(w.phoneDir), "hash-object", file), server.git(path.basename(w.url), "rev-parse", `main:${file}`));
     }
+  });
+
+  it("asks a server for the sizes that tells them as git does, and leaves a file out that is too large", async () => {
+    const files: Record<string, Buffer> = { "huge.bin": Buffer.alloc(20_000, 9) };
+    for (let i = 0; i < 6; i++) {
+      files[`image ${i}.png`] = Buffer.from(Array.from({ length: 3_000 }, () => Math.floor(Math.random() * 256)));
+    }
+    const w = setup(files, true);
+    server.responseSizes.length = 0;
+    const result = await w.syncPhone({ sizes: undefined });
+    assert.deepEqual(result.tooLargeThere, ["huge.bin"]);
+    assert.equal(result.downloaded.length, 6);
+    assert.equal(w.readPhone("huge.bin"), null);
+    // Six images of 3 kB in batches of 4 kB: one to a response, and the file of 20 kB in none
+    assert.ok(Math.max(...server.responseSizes) < 5_000, `a response of ${Math.max(...server.responseSizes)} bytes`);
+    // The file stays on the remote, and comes when the limit lets it in
+    w.writePhone("note.md", "note\n");
+    await w.syncPhone({ sizes: undefined });
+    assert.ok(w.pathsThere().includes("huge.bin"));
+    const raised = await w.syncPhone({ sizes: undefined, maxFileBytes: 50_000 });
+    assert.deepEqual(raised.downloaded, ["huge.bin"]);
+  });
+
+  it("gives the name and the token to a server that asks for them", async () => {
+    const w = setup({ "a.md": "a\n" });
+    server.credentials = "누구:secret token";
+    try {
+      await assert.rejects(w.syncPhone(), /the server wants a token \(401\)/);
+      await assert.rejects(w.syncPhone({ remote: { url: w.url, token: "secret token" } }), /the server refuses the token \(401\)/);
+      const remote = remoteOf(w.url.replace("//", `//${encodeURIComponent("누구")}@`), "secret token");
+      assert.equal(remote.url, w.url);
+      const result = await w.syncPhone({ remote });
+      assert.deepEqual(result.downloaded, ["a.md"]);
+      w.writePhone("b.md", "b\n");
+      assert.deepEqual((await w.syncPhone({ remote })).uploaded, ["b.md"]);
+    } finally {
+      server.credentials = null;
+    }
+    w.pullPc();
+    assert.equal(w.readPc("b.md"), "b\n");
   });
 
   it("gets a file that is too large for one response through the way the host offers", async () => {
