@@ -1,17 +1,17 @@
 // Syncs a folder on disk with a repository, to try the sync outside Obsidian:
-//   TOKEN=... node src/testing/try.ts <address> <folder> [--read-only]
+//   TOKEN=... node testing/try.ts <address> <folder> [--read-only]
 // It prints what happened, how many requests it took, the largest response
 // and the most memory the process held.
 import { mkdirSync } from "node:fs";
-import { githubLargeBlob, githubSizes, parseGitHub } from "../git/github.ts";
-import { type Http } from "../git/http.ts";
-import { remoteOf } from "../git/protocol.ts";
-import { sync } from "../git/sync.ts";
-import { nodeHttp, NodeFs } from "../platform/node.ts";
+import { githubLargeBlob, githubSizes, parseGitHub } from "../src/git/github.ts";
+import { type Http } from "../src/git/http.ts";
+import { remoteOf } from "../src/git/protocol.ts";
+import { sync } from "../src/git/sync.ts";
+import { nodeHttp, NodeFs } from "./node.ts";
 
 const [url, dir, flag] = process.argv.slice(2);
 if (url === undefined || dir === undefined) {
-  console.error("usage: node src/testing/try.ts <address> <folder> [--read-only]");
+  console.error("usage: node testing/try.ts <address> <folder> [--read-only]");
   process.exit(2);
 }
 const token = process.env["TOKEN"];

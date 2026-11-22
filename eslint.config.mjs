@@ -15,7 +15,7 @@ export default defineConfig([
   },
   {
     // What runs on Node.js only: the tests, the git server they talk to, and files and HTTP for them
-    files: ["**/*.test.ts", "src/testing/**", "src/platform/node.ts"],
+    files: ["**/*.test.ts", "testing/**"],
     rules: {
       "obsidianmd/no-nodejs-modules": "off",
       "no-restricted-globals": "off",

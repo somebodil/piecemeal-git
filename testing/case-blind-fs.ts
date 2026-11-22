@@ -1,26 +1,24 @@
-import { type FileStat, type Fs, join } from "../git/fs.ts";
+import { type FileStat, type Fs, join } from "../src/git/fs.ts";
 
 /**
- * Files as an iPhone, an iPad and the apps of a Mac keep them: a name with
- * letters like "é" or "한" is stored with each letter taken apart into its
- * parts, whatever it was written as, and is found under either form. The
- * tests run on file systems that keep a name as it is given, and this makes
- * one that does not.
+ * Files as a phone and most computers keep them: a name is found whatever its
+ * capital letters are, and keeps the spelling it was made with. The tests run
+ * on a file system that tells "a" from "A", and this makes it one that does not.
  */
-export class DecomposingFs implements Fs {
+export class CaseBlindFs implements Fs {
   private readonly inner: Fs;
 
   constructor(inner: Fs) {
     this.inner = inner;
   }
 
-  /** The path as the folder spells it, and taken apart where the folder does not have it yet. */
+  /** The path as the folder spells it, as far as the folder has it. */
   private async spelled(path: string): Promise<string> {
     let out = "";
     for (const name of path === "" ? [] : path.split("/")) {
       const { files, dirs } = await this.inner.list(out);
-      const found = [...dirs, ...files].find((other) => other.normalize("NFC") === name.normalize("NFC"));
-      out = join(out, found ?? name.normalize("NFD"));
+      const found = [...dirs, ...files].find((other) => other.toLowerCase() === name.toLowerCase());
+      out = join(out, found ?? name);
     }
     return out;
   }
@@ -58,7 +56,6 @@ export class DecomposingFs implements Fs {
   }
 
   async list(dir: string): Promise<{ files: string[]; dirs: string[] }> {
-    const { files, dirs } = await this.inner.list(await this.spelled(dir));
-    return { files: files.map((name) => name.normalize("NFD")), dirs: dirs.map((name) => name.normalize("NFD")) };
+    return this.inner.list(await this.spelled(dir));
   }
 }

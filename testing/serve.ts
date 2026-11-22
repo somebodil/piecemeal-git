@@ -1,5 +1,5 @@
 // Serves the repositories of a folder to the devices of the network, to try the plugin from a real phone:
-//   node src/testing/serve.ts <folder> [port]
+//   node testing/serve.ts <folder> [port]
 // Make a repository in the folder first:
 //   git init --bare -b main <folder>/vault.git
 //   git -C <folder>/vault.git config http.receivepack true
@@ -14,7 +14,7 @@ import { TestServer } from "./server.ts";
 
 const [root, port] = process.argv.slice(2);
 if (root === undefined) {
-  console.error("usage: node src/testing/serve.ts <folder> [port]");
+  console.error("usage: node testing/serve.ts <folder> [port]");
   process.exit(2);
 }
 const server = new TestServer(root);

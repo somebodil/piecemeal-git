@@ -1,4 +1,4 @@
-import { type FileStat, type Fs } from "../git/fs.ts";
+import { type FileStat, type Fs } from "../src/git/fs.ts";
 
 /**
  * Files as the app on Android has been seen to keep them: now and then a

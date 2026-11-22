@@ -1,7 +1,7 @@
 import { promises as fsp } from "node:fs";
 import * as path from "node:path";
-import { type FileStat, type Fs } from "../git/fs.ts";
-import { type Http } from "../git/http.ts";
+import { type FileStat, type Fs } from "../src/git/fs.ts";
+import { type Http } from "../src/git/http.ts";
 
 /** The files of a folder on disk. For the tests, and for trying the sync from a terminal. */
 export class NodeFs implements Fs {

@@ -17,11 +17,11 @@ import {
 } from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { nodeHttp, NodeFs } from "../platform/node.ts";
-import { CaseBlindFs } from "../testing/case-blind-fs.ts";
-import { DecomposingFs } from "../testing/decomposing-fs.ts";
-import { FlakyFs } from "../testing/flaky-fs.ts";
-import { TestServer } from "../testing/server.ts";
+import { nodeHttp, NodeFs } from "../../testing/node.ts";
+import { CaseBlindFs } from "../../testing/case-blind-fs.ts";
+import { DecomposingFs } from "../../testing/decomposing-fs.ts";
+import { FlakyFs } from "../../testing/flaky-fs.ts";
+import { TestServer } from "../../testing/server.ts";
 import { VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";

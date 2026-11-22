@@ -83,12 +83,12 @@ The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits,
 From a terminal, into any folder:
 
 ```bash
-TOKEN=... node src/testing/try.ts https://github.com/you/vault.git /some/folder --read-only
+TOKEN=... node testing/try.ts https://github.com/you/vault.git /some/folder --read-only
 ```
 
 `--read-only` stops the sync before it would send anything. Without it, what the folder holds and the repository does not is sent.
 
-For a phone to sync with a repository on your computer, with no host and no token in between, `node src/testing/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
+For a phone to sync with a repository on your computer, with no host and no token in between, `node testing/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
 
 In Obsidian: build, then copy `main.js`, `manifest.json` and `styles.css` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. "Check" in the settings asks the server for its branches and changes nothing, so you see that the address and the token are right. Then run the command "Sync with the repository", or press the icon of the ribbon.
 
@@ -134,9 +134,11 @@ npm run check   # type check, lint, and tests
 npm run build   # type check, then the main.js of a release
 ```
 
+A release is made by a tag with the version of `manifest.json` as its name. GitHub then checks and builds the plugin, attests that `main.js`, `manifest.json` and `styles.css` were built there from this source, and puts them into the release.
+
 - `src/git` holds the git protocol, the objects, and the sync. It knows nothing about Obsidian, so its tests run with plain Node.js against a git server on the same machine.
-- `src/platform` holds what differs between Obsidian and Node.js: files and HTTP.
-- `src/testing` holds the git server of the tests, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
+- `src/platform` holds how the plugin reads and writes files and talks to a server inside Obsidian.
+- `testing` holds what runs on Node.js only and is no part of the plugin: files and HTTP for the tests, the git server that they talk to, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
 - `src/main.ts` is the plugin: the commands, the icon, and what it tells you while a sync runs and after it.
 - `src/ui` holds the settings, the two dialogs, and the words that the plugin says. `styles.css` is how they look.
 
