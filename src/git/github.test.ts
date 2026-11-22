@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { NodeFs } from "../../testing/node.ts";
+import { NodeFs } from "../../tests/node.ts";
 import { githubLargeBlob, parseGitHub } from "./github.ts";
 import { type Http } from "./http.ts";
 import { objectId } from "./objects.ts";

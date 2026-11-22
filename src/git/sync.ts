@@ -514,20 +514,35 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   let knownTrees = new Set<string>();
   let thereRoot: string | null = null;
   if (tip !== null) {
-    if ((await store.read(tip)) === null) {
-      // The commit of last time may be the one that is missing, if its file was lost
-      await fetchCommit(tip, state.commit === tip ? null : state.commit);
-    }
-    let read;
+    // The files of a commit, as they were read from its folders the last time. A remote that
+    // has not moved is then known by one file, and not by one for each of its folders.
+    const flatPath = `${options.storeDir}/flat.json`;
+    let read: { entries: Map<string, Entry>; trees: Set<string>; root: string } | null = null;
     try {
-      read = await readTree(tip);
-    } catch (error) {
-      if (!(error instanceof MissingObjectError)) {
-        throw error;
+      const kept = await fs.read(flatPath);
+      const flat = kept === null ? null : (JSON.parse(decode(kept)) as { commit: string; root: string; entries: Record<string, Entry>; trees: string[] });
+      if (flat !== null && flat.commit === tip && typeof flat.root === "string") {
+        read = { entries: new Map(Object.entries(flat.entries)), trees: new Set(flat.trees), root: flat.root };
       }
-      // A tree that should be here is not. Ask for everything again.
-      await fetchCommit(tip, null);
-      read = await readTree(tip);
+    } catch {
+      // Cut off or not there: the folders are read again
+    }
+    if (read === null) {
+      if ((await store.read(tip)) === null) {
+        // The commit of last time may be the one that is missing, if its file was lost
+        await fetchCommit(tip, state.commit === tip ? null : state.commit);
+      }
+      try {
+        read = await readTree(tip);
+      } catch (error) {
+        if (!(error instanceof MissingObjectError)) {
+          throw error;
+        }
+        // A tree that should be here is not. Ask for everything again.
+        await fetchCommit(tip, null);
+        read = await readTree(tip);
+      }
+      await fs.write(flatPath, encode(JSON.stringify({ commit: tip, root: read.root, entries: Object.fromEntries(read.entries), trees: [...read.trees] })));
     }
     there = read.entries;
     knownTrees = read.trees;
@@ -612,11 +627,23 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         gone.set(before.size, [...(gone.get(before.size) ?? []), path]);
       }
     }
+    /** The size and time of each file as the scan found them, so that the device is asked once */
+    const scanned = new Map<string, FileStat>();
     for (const path of found) {
-      const stat = await fs.stat(path);
+      // Where the app has the size and time of its files in mind, a file that is as it was costs no look at the disk
+      const before = state.stat[path];
+      let stat: FileStat | null = null;
+      if (fs.quickStat !== undefined && before !== undefined && base.has(path) && state.racy?.[path] !== true) {
+        const inMind = await fs.quickStat(path);
+        if (inMind !== null && inMind.size === before.size && inMind.mtime === before.mtime) {
+          stat = before;
+        }
+      }
+      stat ??= await fs.stat(path);
       if (stat === null) {
         continue;
       }
+      scanned.set(path, stat);
       if (stat.size > options.maxFileBytes && !base.has(path)) {
         const was = gone.get(stat.size)?.shift();
         if (was !== undefined) {
@@ -638,11 +665,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
     const skip = new Set(tooLarge);
 
+    // Written a moment ago, if a file was too large: what the scan found of it holds no more
+    scanned.delete(".gitignore");
     for (const path of found) {
       if (skip.has(path)) {
         continue;
       }
-      const stat = await fs.stat(path);
+      const stat = scanned.get(path) ?? (await fs.stat(path));
       if (stat === null) {
         continue;
       }

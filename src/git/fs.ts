@@ -29,6 +29,12 @@ export interface Fs {
   rename(from: string, to: string): Promise<void>;
   /** Size and time of a file, or null if there is none or it is a folder. */
   stat(path: string): Promise<FileStat | null>;
+  /**
+   * Size and time of a file as the app has them in mind, without a look at
+   * the disk, or null if it has none. It can be a moment behind, so it is
+   * good for one thing only: to see that a file is still as it was.
+   */
+  quickStat?(path: string): Promise<FileStat | null> | FileStat | null;
   /** True if there is a folder with this path. */
   isDir(path: string): Promise<boolean>;
   /**
@@ -62,9 +68,13 @@ export class VerifiedFs implements Fs {
   readLink?: (path: string) => Promise<string | null>;
   writeLink?: (path: string, target: string) => Promise<void>;
   discard?: (path: string) => Promise<void>;
+  quickStat?: (path: string) => Promise<FileStat | null> | FileStat | null;
 
   constructor(inner: Fs) {
     this.inner = inner;
+    if (inner.quickStat !== undefined) {
+      this.quickStat = (path) => inner.quickStat!(path);
+    }
     if (inner.discard !== undefined) {
       this.discard = (path) => inner.discard!(path);
     }

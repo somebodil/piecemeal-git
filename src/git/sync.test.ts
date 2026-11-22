@@ -17,12 +17,12 @@ import {
 } from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { nodeHttp, NodeFs } from "../../testing/node.ts";
-import { CaseBlindFs } from "../../testing/case-blind-fs.ts";
-import { DecomposingFs } from "../../testing/decomposing-fs.ts";
-import { FlakyFs } from "../../testing/flaky-fs.ts";
-import { TestServer } from "../../testing/server.ts";
-import { VerifiedFs } from "./fs.ts";
+import { nodeHttp, NodeFs } from "../../tests/node.ts";
+import { CaseBlindFs } from "../../tests/case-blind-fs.ts";
+import { DecomposingFs } from "../../tests/decomposing-fs.ts";
+import { FlakyFs } from "../../tests/flaky-fs.ts";
+import { TestServer } from "../../tests/server.ts";
+import { type FileStat, VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";
 import { CancelledError, type Plan, sync, type SyncOptions, type SyncResult } from "./sync.ts";
@@ -808,6 +808,115 @@ describe("sync", () => {
         },
       });
       assert.deepEqual([asked, pushes], [1, 2]);
+    });
+
+    it("asks the device once for the size and time of a file that did not change", async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 20; i++) {
+        files[`dir ${i % 4}/note ${i}.md`] = `note ${i}\n`;
+      }
+      const w = setup(files);
+      await w.syncPhone();
+      const asked = new Map<string, number>();
+      const fs = new NodeFs(w.phoneDir);
+      const stat = fs.stat.bind(fs);
+      const read = fs.read.bind(fs);
+      let reads = 0;
+      fs.stat = (file) => {
+        asked.set(file, (asked.get(file) ?? 0) + 1);
+        return stat(file);
+      };
+      fs.read = (file) => {
+        reads += file.startsWith(".piecemeal/") ? 0 : 1;
+        return read(file);
+      };
+      // The files are a second old by now, so none has to be read to see that it is as it was
+      for (const file of Object.keys(files)) {
+        utimesSync(path.join(w.phoneDir, file), 1_700_000_000, 1_700_000_000);
+      }
+      await w.syncPhone({ fs });
+      asked.clear();
+      reads = 0;
+      const result = await w.syncPhone({ fs });
+      assert.deepEqual([result.downloaded, result.uploaded], [[], []]);
+      assert.deepEqual(
+        Object.keys(files).map((file) => asked.get(file)),
+        Object.keys(files).map(() => 1),
+      );
+      // Only .gitignore is looked for by reading, and there is none
+      assert.equal(reads, 1);
+    });
+
+    it("knows a remote that did not move by one file, and reads its folders again when that file is no good", async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 12; i++) {
+        files[`dir ${i % 6}/note ${i}.md`] = `note ${i}\n`;
+      }
+      const w = setup(files);
+      await w.syncPhone();
+      const fs = new NodeFs(w.phoneDir);
+      const read = fs.read.bind(fs);
+      let objects = 0;
+      fs.read = (file) => {
+        objects += file.startsWith(".piecemeal/objects/") ? 1 : 0;
+        return read(file);
+      };
+      const quiet = await w.syncPhone({ fs });
+      assert.deepEqual([quiet.downloaded, quiet.uploaded, objects], [[], [], 0]);
+
+      // The remote moves: its folders are read, and the next sync is back to the one file
+      w.writePc("dir 0/note 0.md", "changed\n");
+      w.pushPc();
+      const moved = await w.syncPhone({ fs });
+      assert.deepEqual(moved.downloaded, ["dir 0/note 0.md"]);
+      assert.ok(objects > 0);
+      objects = 0;
+      await w.syncPhone({ fs });
+      assert.equal(objects, 0);
+
+      // The file is cut off, or is of another commit: it counts for nothing
+      const flat = path.join(w.phoneDir, ".piecemeal/flat.json");
+      writeFileSync(flat, readFileSync(flat, "utf8").slice(0, 40));
+      w.removePhone("dir 1/note 1.md");
+      const again = await w.syncPhone({ fs });
+      assert.deepEqual([again.deletedThere, again.deletedHere, again.downloaded], [["dir 1/note 1.md"], [], []]);
+      assert.ok(objects > 0);
+    });
+
+    it("takes the word of the app for a file that is as it was, and looks at the disk for any other", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n", "c.md": "c\n" });
+      await w.syncPhone();
+      for (const file of ["a.md", "b.md", "c.md"]) {
+        utimesSync(path.join(w.phoneDir, file), 1_700_000_000, 1_700_000_000);
+      }
+      await w.syncPhone();
+      const fs = new NodeFs(w.phoneDir) as NodeFs & { quickStat?: (file: string) => FileStat | null };
+      const stat = fs.stat.bind(fs);
+      const looked: string[] = [];
+      fs.stat = (file) => {
+        looked.push(file);
+        return stat(file);
+      };
+      // What the app has in mind: a and b as they were, and nothing of c
+      const inMind = new Map<string, FileStat>();
+      for (const file of ["a.md", "b.md"]) {
+        const now = statSync(path.join(w.phoneDir, file));
+        inMind.set(file, { size: now.size, mtime: Math.floor(now.mtimeMs) });
+      }
+      fs.quickStat = (file) => inMind.get(file) ?? null;
+      const quiet = await w.syncPhone({ fs });
+      assert.deepEqual([quiet.uploaded, looked.filter((file) => !file.startsWith(".piecemeal/"))], [[], ["c.md"]]);
+
+      // The app saw b change. It is looked at, read and sent.
+      w.writePhone("b.md", "b changed\n");
+      const changed = statSync(path.join(w.phoneDir, "b.md"));
+      inMind.set("b.md", { size: changed.size, mtime: Math.floor(changed.mtimeMs) });
+      looked.length = 0;
+      const result = await w.syncPhone({ fs });
+      assert.deepEqual(result.uploaded, ["b.md"]);
+      assert.ok(looked.includes("b.md") && !looked.includes("a.md"));
+      w.pullPc();
+      assert.equal(w.readPc("b.md"), "b changed\n");
     });
 
     it("tells how far it is", async () => {

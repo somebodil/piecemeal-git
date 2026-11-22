@@ -44,6 +44,8 @@ export default class PiecemealGitPlugin extends Plugin {
   private ribbonEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private report: ReportModal | null = null;
+  /** How many files of the vault have a copy from the other side beside them, as of the last look */
+  private copies = 0;
 
   override async onload(): Promise<void> {
     const data = ((await this.loadData()) ?? {}) as Partial<Settings> & { last?: Last | null };
@@ -124,6 +126,10 @@ export default class PiecemealGitPlugin extends Plugin {
   /** Brings the icon of the ribbon and the status bar up to what is known. */
   private refresh(): void {
     const { last } = this;
+    // A look at every name of the vault. Not while a sync runs: it asks for this many times a second.
+    if (!this.running) {
+      this.copies = conflictCopies(this.app).length;
+    }
     let icon = "refresh-cw";
     let words = "Not synced yet";
     if (this.running) {
@@ -134,7 +140,7 @@ export default class PiecemealGitPlugin extends Plugin {
       if (!last.ok) {
         icon = "alert-triangle";
         words = `Sync failed ${ago(last.at)}`;
-      } else if (last.attention || conflictCopies(this.app).length > 0) {
+      } else if (last.attention || this.copies > 0) {
         icon = "alert-circle";
         words = `Synced ${ago(last.at)}, with something to look at`;
       } else {
@@ -214,18 +220,28 @@ export default class PiecemealGitPlugin extends Plugin {
     let waiting = unasked ? null : new Notice("Syncing…", 0);
     /** True if a sync that nobody asked for stopped because a person should see first what it is about to do */
     let held = false;
+    /** When the notice and the icon last said how far the sync is */
+    let shownAt = 0;
     try {
       const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
       const fs = new VerifiedFs(
-        new ObsidianFs(this.app.vault.adapter, async (path) => {
+        new ObsidianFs(
+          this.app.vault.adapter,
           // A file that the remote removed goes where Obsidian puts the files that a person deletes
-          const file = this.app.vault.getAbstractFileByPath(path);
-          if (!(file instanceof TFile)) {
-            return false;
-          }
-          await this.app.fileManager.trashFile(file);
-          return true;
-        }),
+          async (path) => {
+            const file = this.app.vault.getAbstractFileByPath(path);
+            if (!(file instanceof TFile)) {
+              return false;
+            }
+            await this.app.fileManager.trashFile(file);
+            return true;
+          },
+          // Obsidian keeps the size and time of every note in mind, which saves a look at the disk for each
+          (path) => {
+            const file = this.app.vault.getAbstractFileByPath(path);
+            return file instanceof TFile ? { size: file.stat.size, mtime: file.stat.mtime } : null;
+          },
+        ),
       );
       const remote = remoteOf(url, token);
       const github = parseGitHub(remote.url);
@@ -255,8 +271,13 @@ export default class PiecemealGitPlugin extends Plugin {
         largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
         onProgress: (progress) => {
           this.progress = progress;
-          waiting?.setMessage(progressText(progress));
-          this.refresh();
+          // Told for every file. What is shown follows a few times a second, which is all that an eye takes in.
+          const now = Date.now();
+          if (now - shownAt >= 150 || progress.done === 0 || progress.done === progress.total) {
+            shownAt = now;
+            waiting?.setMessage(progressText(progress));
+            this.refresh();
+          }
         },
         confirm: async (plan) => {
           if (!worthAsking(plan)) {

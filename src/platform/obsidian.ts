@@ -23,10 +23,17 @@ export class ObsidianFs implements Fs {
   private readonly made = new Set<string>([""]);
   /** Puts a file where the app keeps what a person deleted. False if it is not a file that the app does that for. */
   private readonly trash: ((path: string) => Promise<boolean>) | null;
+  /** The size and time of a file as Obsidian has them in mind, or null for a file that it keeps no list of */
+  private readonly inMind: ((path: string) => FileStat | null) | null;
 
-  constructor(adapter: DataAdapter, trash?: (path: string) => Promise<boolean>) {
+  constructor(adapter: DataAdapter, trash?: (path: string) => Promise<boolean>, inMind?: (path: string) => FileStat | null) {
     this.adapter = adapter;
     this.trash = trash ?? null;
+    this.inMind = inMind ?? null;
+  }
+
+  quickStat(path: string): FileStat | null {
+    return this.inMind?.(path) ?? null;
   }
 
   async discard(path: string): Promise<void> {

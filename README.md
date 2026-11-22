@@ -55,6 +55,8 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
 - A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
 - An iPhone, an iPad and a Mac keep a name like `한글.md` or `é.md` with each letter taken apart into its parts, whatever the name was written as, and git keeps a name as it is given. On those devices a file of the vault has the name that the repository has for it, and a new file is sent with the letters of its name in one piece, as git does on a Mac. So a name does not change in the repository by going through such a device.
+- A sync that finds nothing to do is short. For a note that Obsidian knows to be as it was, the disk is not asked. While the remote has not moved, its files are known from one file. On an emulated phone such a sync of a hundred notes took a tenth of a second.
+- A note that is changed behind the back of Obsidian, by another app while Obsidian does not look, is sent once Obsidian has seen the change, which it does when it comes to the front again.
 - Every file that a sync writes is looked at afterwards, and written again if it does not have the size it should have. A file that cannot be written at all is taken out again and asked for by the next sync, so that a file that is cut off is never taken for a change of yours. A commit or a folder that the plugin kept and cannot read any more is asked for again.
 - A link of the repository is a file in the vault that holds where the link points. This is how git keeps a link where links cannot be made, as on a phone. It stays a link in the repository, also when you write another place into it. From a terminal the sync makes real links, and sends a link as a link, without going into a folder that it points to.
 - A file that was left out of the vault is looked at again by every sync, and comes when what kept it out is gone: the other file of its name was removed or renamed, or the limit was raised above its size. As long as it stays out, a sync asks the repository nothing about it and tells you nothing more.
@@ -76,19 +78,19 @@ Files that are too large:
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 - A tracked file above the limit that gets another name on the device keeps what the repository has for it, under the new name. It is too large to be read, so it is known by its size: a new file above the limit that has, to the byte, the size of a tracked file that is gone is taken for that file.
 
-The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian, nor the two files in which Obsidian keeps what is open on a device are ever synced. What the repository has under those names stays there and is not taken.
+The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, one file that says what was agreed on, and one that lists the files of the commit that the remote was at. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian, nor the two files in which Obsidian keeps what is open on a device are ever synced. What the repository has under those names stays there and is not taken.
 
 ## Trying it
 
 From a terminal, into any folder:
 
 ```bash
-TOKEN=... node testing/try.ts https://github.com/you/vault.git /some/folder --read-only
+TOKEN=... node tests/try.ts https://github.com/you/vault.git /some/folder --read-only
 ```
 
 `--read-only` stops the sync before it would send anything. Without it, what the folder holds and the repository does not is sent.
 
-For a phone to sync with a repository on your computer, with no host and no token in between, `node testing/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
+For a phone to sync with a repository on your computer, with no host and no token in between, `node tests/serve.ts <folder> [port]` serves the repositories of a folder to the devices of your network. The top of that file says how to make a repository there.
 
 In Obsidian: build, then copy `main.js`, `manifest.json` and `styles.css` to `.obsidian/plugins/piecemeal-git/` of a vault, turn the plugin on, and give it the address of the repository and a token. The token needs to read and write the contents of that one repository. "Check" in the settings asks the server for its branches and changes nothing, so you see that the address and the token are right. Then run the command "Sync with the repository", or press the icon of the ribbon.
 
@@ -134,11 +136,11 @@ npm run check   # type check, lint, and tests
 npm run build   # type check, then the main.js of a release
 ```
 
-A release is made by a tag with the version of `manifest.json` as its name. GitHub then checks and builds the plugin, attests that `main.js`, `manifest.json` and `styles.css` were built there from this source, and puts them into the release. The directory of Obsidian finds a new release by itself in time, and at once when "Check for new releases" is pressed on the page of the plugin at community.obsidian.md. It then reviews the release, and warns about the files in `testing` as if they were parts of the plugin.
+A release is made by a tag with the version of `manifest.json` as its name. GitHub then checks and builds the plugin, attests that `main.js`, `manifest.json` and `styles.css` were built there from this source, and puts them into the release. The directory of Obsidian finds a new release by itself in time, and at once when "Check for new releases" is pressed on the page of the plugin at community.obsidian.md. It then reviews the release.
 
 - `src/git` holds the git protocol, the objects, and the sync. It knows nothing about Obsidian, so its tests run with plain Node.js against a git server on the same machine.
 - `src/platform` holds how the plugin reads and writes files and talks to a server inside Obsidian.
-- `testing` holds what runs on Node.js only and is no part of the plugin: files and HTTP for the tests, the git server that they talk to, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
+- `tests` holds what runs on Node.js only and is no part of the plugin: files and HTTP for the tests, the git server that they talk to, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
 - `src/main.ts` is the plugin: the commands, the icon, and what it tells you while a sync runs and after it.
 - `src/ui` holds the settings, the two dialogs, and the words that the plugin says. `styles.css` is how they look.
 

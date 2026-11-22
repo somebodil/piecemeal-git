@@ -106,7 +106,8 @@ export class NodeFs implements Fs {
 }
 
 export const nodeHttp: Http = async (request) => {
-  const response = await fetch(request.url, {
+  // Node.js has no `requestUrl`: that is a part of Obsidian, and this file never runs there
+  const response = await globalThis.fetch(request.url, {
     method: request.method,
     headers: request.headers,
     body: request.body as Uint8Array<ArrayBuffer> | undefined,
