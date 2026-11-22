@@ -48,6 +48,7 @@ const result = await sync({
   storeDir: ".piecemeal",
   author: { name: "Piecemeal Git", email: "piecemeal@example.com" },
   message: (when) => `vault sync ${when.toISOString()}`,
+  composeNames: process.platform === "darwin",
   maxFileBytes: 20 * MB,
   batchBytes: 4 * MB,
   sizes: github === null ? undefined : githubSizes(http, github, token),

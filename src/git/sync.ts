@@ -47,6 +47,14 @@ export interface SyncOptions {
   author: { name: string; email: string };
   /** The message of a commit that this device makes */
   message: (when: Date) => string;
+  /**
+   * True on a device that keeps a name like "é.md" or "한글.md" with each
+   * letter taken apart into its parts, whatever the name was written as, and
+   * finds it under either form: an iPhone, an iPad, a Mac. The names of the
+   * vault are then read as the repository spells them, and a new name is sent
+   * with its letters in one piece, as git does on a Mac.
+   */
+  composeNames?: boolean;
   /** A file larger than this is neither sent nor asked for in one piece */
   maxFileBytes: number;
   /** Contents of files are asked for, and sent, in batches of about this size */
@@ -93,8 +101,10 @@ interface State {
   tree: Record<string, Entry>;
   /** Size and time of each file when it was last known to be as `tree` says */
   stat: Record<string, FileStat>;
-  /** Paths of `tree` that are not in the vault: too large, or not a file */
+  /** Paths of `tree` that are not in the vault: too large, named like another file, or not a file */
   absent: Record<string, true>;
+  /** The sizes of the files of `absent` that are not in the vault because they are too large */
+  large?: Record<string, number>;
   /**
    * Files that were changed so shortly before `stat` was noted that another
    * change could leave their size and time as they are. They are read again.
@@ -107,6 +117,9 @@ interface State {
  * the coarsest clock of a file system that a vault is kept on, and a little more.
  */
 const RACY_MS = 3000;
+
+/** Endings of names of files that are text, and with that mostly small */
+const TEXT_KINDS = new Set(["md", "txt", "json", "canvas", "base", "css", "js", "ts", "yaml", "yml", "csv", "html", "xml", "svg", ""]);
 
 class MissingObjectError extends Error {}
 
@@ -248,12 +261,40 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   // does not. So a file is in the vault only if the vault spells every name of
   // its path as the path does, and what the remote has under another spelling
   // of a name of the vault cannot be put beside it.
+  //
+  // Some devices also keep "é" as "e" and an accent, and "한" as its three
+  // parts, whatever the name was written as. There a name of the vault is the
+  // name that the repository has for it, and a new one has its letters in one
+  // piece, so that a name does not change by going through such a device.
+  /** How the repository spells a path or a folder, by the path with its letters in one piece */
+  const spelling = new Map<string, string>();
+  const noteSpelling = (paths: Iterable<string>): void => {
+    if (options.composeNames !== true) {
+      return;
+    }
+    for (const path of paths) {
+      for (let at = path; at !== ""; at = folderOf(at)) {
+        const composed = at.normalize("NFC");
+        if (!spelling.has(composed)) {
+          spelling.set(composed, at);
+        }
+      }
+    }
+  };
+  /** The name of something in a folder of the vault, as the sync calls it */
+  const named = (dir: string, name: string): string => {
+    if (options.composeNames !== true) {
+      return name;
+    }
+    const known = spelling.get(join(dir, name).normalize("NFC"));
+    return known !== undefined && folderOf(known) === dir ? known.slice(dir === "" ? 0 : dir.length + 1) : name.normalize("NFC");
+  };
   const listings = new Map<string, { files: Set<string>; dirs: Set<string> }>();
   const listing = async (dir: string): Promise<{ files: Set<string>; dirs: Set<string> }> => {
     let listed = listings.get(dir);
     if (listed === undefined) {
       const { files, dirs } = await fs.list(dir);
-      listed = { files: new Set(files), dirs: new Set(dirs) };
+      listed = { files: new Set(files.map((name) => named(dir, name))), dirs: new Set(dirs.map((name) => named(dir, name))) };
       listings.set(dir, listed);
     }
     return listed;
@@ -354,6 +395,8 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   }
 
   // --- What the vault holds now ---------------------------------------------
+  noteSpelling(base.keys());
+  noteSpelling(there.keys());
   const here = new Map<string, Entry>();
   const stats = new Map<string, FileStat>();
   /** The files that the vault holds, whatever is to become of them */
@@ -477,6 +520,14 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   // --- Compare, path by path ------------------------------------------------
   const agreed = new Map(base);
   const absent = new Set(Object.keys(state.absent));
+  /** The sizes of the files that were left out of the vault for their size */
+  const large = new Map(Object.entries(state.large ?? {}));
+  /**
+   * Files that an earlier sync left out of the vault, and that this one looks
+   * at again: the limit may have been raised since, or the file that had the
+   * name may be gone. One that is left out again is not told about again.
+   */
+  const again = new Set<string>();
   /** The tree of the commit that this sync leaves on the remote */
   const target = new Map(there);
   /** `from` is where the remote has the content, when that is not `path` */
@@ -500,6 +551,13 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           removeHere.push(path);
         } else {
           downloads.push({ path, entry: t });
+        }
+      } else if (t !== undefined && isFile(t) && absent.has(path) && !present.has(path)) {
+        // Left out before. A file that was too large is asked for only if the limit lets it in now.
+        const size = large.get(path);
+        if (size === undefined || size <= options.maxFileBytes) {
+          downloads.push({ path, entry: t });
+          again.add(path);
         }
       }
     } else if (same(t, b)) {
@@ -565,6 +623,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         agreed.set(to, entry);
         if (absent.delete(from)) {
           absent.add(to);
+          const size = large.get(from);
+          if (size !== undefined) {
+            large.set(to, size);
+          }
         }
       }
       result.conflicts.push({ path: from, copy: to });
@@ -594,6 +656,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       tree: Object.fromEntries(agreed),
       stat: {},
       absent: {},
+      large: {},
       racy: {},
     };
     // A file that changed this shortly before now can change again without its time moving on
@@ -602,6 +665,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       const stat = stats.get(path);
       if (absent.has(path)) {
         next.absent[path] = true;
+        const size = large.get(path);
+        if (size !== undefined) {
+          next.large![path] = size;
+        }
       } else if (stat !== undefined) {
         next.stat[path] = stat;
         if (stat.mtime > racyAfter) {
@@ -734,16 +801,27 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     }
 
     if (downloads.length > 0) {
-      const sizes = (thereRoot !== null ? await options.sizes?.(thereRoot) : undefined) ?? new Map<string, number>();
+      // Asked for when the first file needs it. A sync that only looks again at files that stay out asks nothing.
+      let sizes: Map<string, number> | null = null;
+      const sizeOf = async (oid: string): Promise<number | undefined> => {
+        sizes ??= (thereRoot !== null ? await options.sizes?.(thereRoot) : undefined) ?? new Map<string, number>();
+        return sizes.get(oid);
+      };
       /** The paths that wait for the content with an id */
       const wanted = new Map<string, { path: string; entry: Entry }[]>();
-      const settle = (path: string, entry: Entry, isAbsent: boolean): void => {
+      /** `tooLarge` is the size of a file that stays out of the vault because of it */
+      const settle = (path: string, entry: Entry, isAbsent: boolean, tooLarge?: number): void => {
         agreed.set(path, entry);
         if (isAbsent) {
           absent.add(path);
           stats.delete(path);
         } else {
           absent.delete(path);
+        }
+        if (tooLarge === undefined) {
+          large.delete(path);
+        } else {
+          large.set(path, tooLarge);
         }
       };
       /**
@@ -778,8 +856,11 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         if (!(await spelledOtherwise(path))) {
           return false;
         }
+        // Told when it is news: not for a file that was left out for its name before
+        if (!again.has(path) || large.has(path)) {
+          result.sameName.push(path);
+        }
         settle(path, entry, true);
-        result.sameName.push(path);
         return true;
       };
       for (const { path, entry, from } of downloads) {
@@ -795,7 +876,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           result.busy.push(path);
           continue;
         }
-        const size = sizes.get(entry.oid);
+        const size = await sizeOf(entry.oid);
         if (size !== undefined && size > options.maxFileBytes) {
           const file = { oid: entry.oid, size, commit: thereCommit!, path: from ?? path };
           const { largeBlob } = options;
@@ -808,7 +889,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
             settle(path, entry, false);
             result.downloaded.push(path);
           } else if (result.busy.length === busyBefore) {
-            settle(path, entry, true);
+            settle(path, entry, true, size);
             result.tooLargeThere.push(path);
           }
           continue;
@@ -821,8 +902,24 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         }
       }
 
-      // A size that is not known counts as a guess, so that a batch still ends somewhere
-      const GUESS = 64 * 1024;
+      // A size that the host does not tell is guessed from the files of the same kind that
+      // came before, so that a batch still ends somewhere near where it is meant to.
+      // The first file of a kind that is rarely text is taken to fill a batch by itself.
+      const seen = new Map<string, { bytes: number; count: number }>();
+      const kindOf = (oid: string): string => {
+        const { path } = wanted.get(oid)![0];
+        const name = path.slice(path.lastIndexOf("/") + 1);
+        const dot = name.lastIndexOf(".");
+        return dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
+      };
+      const guess = (oid: string): number => {
+        const kind = kindOf(oid);
+        const before = seen.get(kind);
+        if (before !== undefined) {
+          return Math.max(1, Math.ceil(before.bytes / before.count));
+        }
+        return TEXT_KINDS.has(kind) ? Math.min(64 * 1024, options.batchBytes) : options.batchBytes;
+      };
       let batch: string[] = [];
       let bytes = 0;
       const flush = async (): Promise<void> => {
@@ -836,6 +933,9 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
           if (object === undefined || object.type !== "blob") {
             throw new Error(`fetch: the server did not send ${oid}`);
           }
+          const kind = kindOf(oid);
+          const before = seen.get(kind) ?? { bytes: 0, count: 0 };
+          seen.set(kind, { bytes: before.bytes + object.data.length, count: before.count + 1 });
           for (const { path, entry } of wanted.get(oid)!) {
             const { data } = object;
             // Another file of this sync may have taken the name under another spelling
@@ -861,7 +961,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
         bytes = 0;
       };
       for (const oid of wanted.keys()) {
-        const size = sizes.get(oid) ?? GUESS;
+        const size = (await sizeOf(oid)) ?? guess(oid);
         if (batch.length > 0 && bytes + size > options.batchBytes) {
           await flush();
         }

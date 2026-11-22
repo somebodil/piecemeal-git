@@ -128,20 +128,21 @@ export default class PiecemealGitPlugin extends Plugin {
    * @param unasked true for a sync that started by itself. It says nothing
    *   while it runs, and afterwards only what is worth an interruption: that
    *   something was taken, that something asks for attention, or that it failed.
+   * @returns what the sync did, or null if it did not run or failed
    */
-  async sync(unasked = false): Promise<void> {
+  async sync(unasked = false): Promise<SyncResult | null> {
     if (this.running) {
       if (!unasked) {
         new Notice("A sync is running already.");
       }
-      return;
+      return null;
     }
     const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB } = this.config;
     if (url === "") {
       if (!unasked) {
         new Notice("Give the address of the repository in the settings first.");
       }
-      return;
+      return null;
     }
     this.running = true;
     const progress = unasked ? null : new Notice("Syncing…", 0);
@@ -164,6 +165,8 @@ export default class PiecemealGitPlugin extends Plugin {
           email: authorEmail !== "" ? authorEmail : "piecemeal-git@users.noreply.github.com",
         },
         message: () => `Sync from ${from}`,
+        // An iPhone, an iPad and a Mac keep the letters of a name like "한글.md" in parts
+        composeNames: Platform.isIosApp || Platform.isMacOS,
         maxFileBytes: maxFileMB * MB,
         batchBytes: BATCH_BYTES,
         sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
@@ -175,11 +178,13 @@ export default class PiecemealGitPlugin extends Plugin {
         new Notice(text, attention ? 0 : 5000);
       }
       this.failedUnasked = false;
+      return result;
     } catch (error) {
       if (!unasked || !this.failedUnasked) {
         new Notice(`The sync failed. ${error instanceof Error ? error.message : String(error)}`, 0);
       }
       this.failedUnasked = unasked;
+      return null;
     } finally {
       progress?.hide();
       this.running = false;
@@ -208,7 +213,7 @@ const ROWS: Row[] = [
     type: "number",
     key: "maxFileMB",
     name: "Largest file to send",
-    desc: "In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told.",
+    desc: "In megabytes. A new file above this is not sent. It is written into .gitignore, and you are told. A file of the repository that was left out for its size comes once this lets it in.",
     min: 1,
   },
   {

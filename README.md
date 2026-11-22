@@ -19,6 +19,7 @@ What has been checked, and how:
 - Inside the desktop app of Obsidian 1.12.7, the plugin synced a vault with the git server that comes with git, both ways: a first sync into an empty repository, changes of both sides, a file that both changed, removals, a file too large to send, a name that is a file on one side and a folder on the other, and a sync that started by itself. A clone made by git had the same files each time, and `git fsck` had nothing to say.
 - Also inside Obsidian, a public and a private repository on GitHub came into a folder without anything being sent, and in both one file came in ranges of bytes. Every file was as the repository has it.
 - Inside the mobile app of Obsidian 1.15.1, on an emulated phone and an emulated tablet with Android 17, the plugin synced a vault with the git server that comes with git: a first sync, changes of both sides, a file that both changed, removals, binary files of several megabytes each way, a name that is a file on one side and a folder on the other, a sync when the app starts, and a sync without a network. After every step a clone made by git had the same files as the device, and `git fsck` had nothing to say. GitHub, a token, and the sync that a timer starts were not tried there.
+- On a Mac, from a terminal, through a file system that keeps names as an iPhone does: a vault of some hundred files, many of them with Korean names, came from the git server that comes with git. Every file had the id that git gives it, and a second sync sent nothing. Then both sides changed, added, removed and renamed files, and both changed one. A clone made by git had the same files, `git fsck` had nothing to say, and no name had reached the repository with its letters apart. How an iPhone keeps names was found by asking the file functions of Apple on the Mac, not on an iPhone.
 
 ## How it syncs
 
@@ -33,11 +34,14 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A file that was changed in the three seconds before a sync is read again by the next one. Its size and time alone would not tell a second change in the same moment.
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
 - A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
+- An iPhone, an iPad and a Mac keep a name like `한글.md` or `é.md` with each letter taken apart into its parts, whatever the name was written as, and git keeps a name as it is given. On those devices a file of the vault has the name that the repository has for it, and a new file is sent with the letters of its name in one piece, as git does on a Mac. So a name does not change in the repository by going through such a device.
+- A file that was left out of the vault is looked at again by every sync, and comes when what kept it out is gone: the other file of its name was removed or renamed, or the limit was raised above its size. As long as it stays out, a sync asks the repository nothing about it and tells you nothing more.
 
 Files that are too large:
 
 - A new file above the limit (20 MB unless you change it) is not sent. Its path is written into a part of `.gitignore` that the plugin keeps, between two marker lines, and you are told. The file stays in the vault.
 - A file of the repository above the limit is asked for in ranges of bytes and written piece by piece. The pieces are added up to the id that git gives the file, and a file with another id is not put into the vault. This works on GitHub. Another host does not tell how large a file is before it sends it, so there the file comes in one piece, however large it is.
+- On such a host the size of a file is guessed from the files of the same kind that came before it, by the ending of its name, and a batch is made up by these guesses. The first file of a kind that is rarely text is asked for by itself.
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 
 The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, and one file that says what was agreed on. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian are ever synced. What the repository has under those names stays there and is not taken.
@@ -62,11 +66,11 @@ Try it on a copy of a vault first.
 
 ## Not done yet
 
-- It has not run on a real phone or tablet, and not on iOS.
-- A file that was left out of the vault, for its size or for its name, is not looked at again until the repository changes it. Raising the limit or removing the other file does not bring it in.
+- It has not run on a real phone or tablet, and not on iOS. Inside Obsidian on a Mac it has not run either.
+- A device that keeps the letters of a name apart cannot hold two files whose names differ in this only. The second one is left out of the vault, like one that differs in capital letters only.
 - Links and repositories inside the repository are left alone: they stay in the repository and are not made in the vault.
 - A file above the limit that is changed twice in the same moment, to the same size, is not seen as changed. It is too large to read again.
-- On a host other than GitHub the sizes of files are not known before they come, so a batch can be larger than meant, and a file above the limit comes whole.
+- On a host other than GitHub the sizes of files are not known before they come, so a batch can be larger than meant, and a file above the limit comes whole. The git protocol has a way to ask for sizes, `object-info`, but none of GitHub, GitLab and Codeberg offers it.
 
 ## Development
 
@@ -80,7 +84,7 @@ npm run build   # type check, then the main.js of a release
 
 - `src/git` holds the git protocol, the objects, and the sync. It knows nothing about Obsidian, so its tests run with plain Node.js against a git server on the same machine.
 - `src/platform` holds what differs between Obsidian and Node.js: files and HTTP.
-- `src/testing` holds the git server of the tests and the script that syncs from a terminal.
+- `src/testing` holds the git server of the tests, the script that syncs from a terminal, and two file systems that play a phone: one that does not tell capital letters from small ones, and one that takes the letters of a name apart.
 - `src/main.ts` is the plugin: the settings, the command, and what it tells you after a sync.
 
 ## License

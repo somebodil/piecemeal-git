@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { nodeHttp, NodeFs } from "../platform/node.ts";
 import { CaseBlindFs } from "../testing/case-blind-fs.ts";
+import { DecomposingFs } from "../testing/decomposing-fs.ts";
 import { TestServer } from "../testing/server.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { sync, type SyncOptions, type SyncResult } from "./sync.ts";
@@ -44,6 +45,10 @@ describe("sync", () => {
         server.git(pc, "commit", "-q", "--allow-empty", "-m", message);
         server.git(pc, "push", "-q", "origin", "HEAD:main");
       },
+      /** Commits changes on the remote as a computer would that tells capital letters apart. Null removes a file. */
+      commitThere(changes: Record<string, string | Buffer | null>, message = "from another computer"): void {
+        server.commit(name, changes, message);
+      },
       pullPc(): void {
         server.git(pc, "pull", "-q", "origin", "main");
       },
@@ -66,6 +71,13 @@ describe("sync", () => {
       },
       log(): string[] {
         return server.git(`${name}.git`, "log", "--format=%s", "main").split("\n");
+      },
+      /** The paths of the files that the branch of the remote holds, spelled as it has them. */
+      pathsThere(): string[] {
+        return server
+          .git(`${name}.git`, "-c", "core.quotepath=false", "-c", "core.precomposeunicode=false", "ls-tree", "-r", "--name-only", "main")
+          .split("\n")
+          .sort();
       },
       syncPhone(extra: Partial<SyncOptions> = {}): Promise<SyncResult> {
         return sync({
@@ -236,6 +248,48 @@ describe("sync", () => {
     w.pullPc();
     assert.equal(readFileSync(path.join(w.pcDir, "huge.bin")).length, 50_000);
     assert.equal(w.readPc("a.md"), "a changed\n");
+  });
+
+  it("takes a file that was too large once the limit lets it in, and asks nothing about it until then", async () => {
+    const w = setup({ "a.md": "a\n", "huge.bin": Buffer.alloc(50_000, 7) });
+    const first = await w.syncPhone();
+    assert.deepEqual([first.downloaded, first.tooLargeThere], [["a.md"], ["huge.bin"]]);
+
+    // The same limit: the file is not asked about again, and nothing is said
+    const before = server.responseSizes.length;
+    const second = await w.syncPhone({
+      sizes: async () => {
+        throw new Error("the sizes were asked for");
+      },
+    });
+    assert.deepEqual([second.downloaded, second.tooLargeThere, second.uploaded, second.deletedThere], [[], [], [], []]);
+    assert.equal(server.responseSizes.length - before, 1);
+
+    const third = await w.syncPhone({ maxFileBytes: 100_000 });
+    assert.deepEqual([third.downloaded, third.tooLargeThere, third.uploaded], [["huge.bin"], [], []]);
+    assert.equal(readFileSync(path.join(w.phoneDir, "huge.bin")).length, 50_000);
+    const fourth = await w.syncPhone({ maxFileBytes: 100_000 });
+    assert.deepEqual([fourth.downloaded, fourth.uploaded, fourth.deletedThere], [[], [], []]);
+    assert.deepEqual(w.log(), ["first"]);
+  });
+
+  it("keeps batches small on a host that does not tell the sizes, by what came before", async () => {
+    const files: Record<string, string | Buffer> = {};
+    for (let i = 0; i < 24; i++) {
+      files[`notes/note ${i}.md`] = `note ${i}\n${"some text of a note. ".repeat(40)}${Math.random()}\n`;
+      files[`pictures/picture ${i}.png`] = Buffer.from(Array.from({ length: 3000 }, () => Math.floor(Math.random() * 256)));
+    }
+    const w = setup(files);
+    const before = server.responseSizes.length;
+    const result = await w.syncPhone({ sizes: undefined });
+    assert.equal(result.downloaded.length, 48);
+    const responses = server.responseSizes.slice(before);
+    // Notes of 850 bytes come several at a time, pictures of 3000 bytes one at a time
+    assert.ok(responses.length < 48, `${responses.length} requests`);
+    assert.ok(Math.max(...responses) < 8_000, `largest response ${Math.max(...responses)}`);
+    for (const file of Object.keys(files)) {
+      assert.equal(server.git(path.basename(w.phoneDir), "hash-object", file), server.git(path.basename(w.url), "rev-parse", `main:${file}`));
+    }
   });
 
   it("gets a file that is too large for one response through the way the host offers", async () => {
@@ -460,7 +514,8 @@ describe("sync", () => {
     const names = (dir: string): string[] => readdirSync(dir).filter((name) => name !== ".piecemeal").sort();
 
     it("leaves out a file of the remote that is named like another but for capital letters", async () => {
-      const w = setup({ "Note.md": "capital\n", "note.md": "small\n", "other.md": "other\n" });
+      const w = setup();
+      w.commitThere({ "Note.md": "capital\n", "note.md": "small\n", "other.md": "other\n" }, "first");
       const first = await w.syncPhone(blind(w));
       assert.equal(first.sameName.length, 1);
       const [out] = first.sameName;
@@ -474,15 +529,13 @@ describe("sync", () => {
       assert.deepEqual(w.log(), ["first"]);
 
       // A change of the file that was left out does not reach the one that is here
-      w.writePc(out, "changed on the computer\n");
-      w.pushPc("change");
+      w.commitThere({ [out]: "changed on the computer\n" }, "change");
       const third = await w.syncPhone(blind(w));
       assert.deepEqual([third.sameName, third.downloaded, third.uploaded, third.busy], [[out], [], [], []]);
       assert.equal(w.readPhone(kept), kept === "Note.md" ? "capital\n" : "small\n");
 
       // Nor does its removal
-      rmSync(path.join(w.pcDir, out));
-      w.pushPc("removal");
+      w.commitThere({ [out]: null }, "removal");
       const fourth = await w.syncPhone(blind(w));
       assert.deepEqual([fourth.deletedHere, fourth.uploaded, fourth.deletedThere, fourth.busy], [[], [], [], []]);
       assert.deepEqual(names(w.phoneDir), [kept, "other.md"].sort());
@@ -491,11 +544,39 @@ describe("sync", () => {
       assert.deepEqual(w.log(), ["removal", "change", "first"]);
     });
 
+    it("takes a file that was left out for its name once the other one is gone", async () => {
+      const w = setup();
+      w.commitThere({ "Note.md": "capital\n", "note.md": "small\n" }, "first");
+      const first = await w.syncPhone(blind(w));
+      const [out] = first.sameName;
+      const kept = out === "Note.md" ? "note.md" : "Note.md";
+
+      // As long as the other one is there, a sync looks, asks the remote nothing, and says nothing
+      const before = server.responseSizes.length;
+      const second = await w.syncPhone({
+        ...blind(w),
+        sizes: async () => {
+          throw new Error("the sizes were asked for");
+        },
+      });
+      assert.deepEqual([second.downloaded, second.sameName], [[], []]);
+      assert.equal(server.responseSizes.length - before, 1);
+
+      // The one that had the name is removed on the device: its removal is sent, and the other one comes
+      w.removePhone(kept);
+      const third = await w.syncPhone(blind(w));
+      assert.deepEqual([third.deletedThere, third.downloaded, third.sameName], [[kept], [out], []]);
+      assert.deepEqual(names(w.phoneDir), [out]);
+      assert.equal(w.readPhone(out), out === "Note.md" ? "capital\n" : "small\n");
+      const fourth = await w.syncPhone(blind(w));
+      assert.deepEqual([fourth.downloaded, fourth.uploaded, fourth.deletedThere, fourth.sameName], [[], [], [], []]);
+      assert.deepEqual(w.log(), ["from the phone", "first"]);
+    });
+
     it("leaves out a file of a folder that is spelled otherwise in the vault", async () => {
       const w = setup({ "Notes/a.md": "a\n" });
       await w.syncPhone(blind(w));
-      w.writePc("notes/b.md", "b\n");
-      w.pushPc("another spelling");
+      w.commitThere({ "notes/b.md": "b\n" }, "another spelling");
       const result = await w.syncPhone(blind(w));
       assert.deepEqual([result.sameName, result.downloaded], [["notes/b.md"], []]);
       assert.deepEqual(names(path.join(w.phoneDir, "Notes")), ["a.md"]);
@@ -506,8 +587,7 @@ describe("sync", () => {
     it("takes a name that the remote spells otherwise now", async () => {
       const w = setup({ "Note.md": "a note\n" });
       await w.syncPhone(blind(w));
-      renameSync(path.join(w.pcDir, "Note.md"), path.join(w.pcDir, "note.md"));
-      w.pushPc("small letters");
+      w.commitThere({ "Note.md": null, "note.md": "a note\n" }, "small letters");
       const result = await w.syncPhone(blind(w));
       assert.deepEqual([result.deletedHere, result.downloaded, result.sameName], [["Note.md"], ["note.md"], []]);
       assert.deepEqual(names(w.phoneDir), ["note.md"]);
@@ -528,6 +608,82 @@ describe("sync", () => {
       assert.equal(w.readPc("folder/in.md"), "inside\n");
       const again = await w.syncPhone(blind(w));
       assert.deepEqual([again.uploaded, again.deletedThere, again.downloaded], [[], [], []]);
+    });
+  });
+
+  // An iPhone, an iPad and the apps of a Mac keep "한" as its three parts and "é" as "e" and an accent,
+  // whatever a name was written as. Git keeps a name as it is given, which for most is in one piece.
+  describe("in a vault that takes the letters of a name apart", () => {
+    const apple = (w: { phoneDir: string }): Partial<SyncOptions> => ({
+      fs: new DecomposingFs(new NodeFs(w.phoneDir)),
+      composeNames: true,
+    });
+    const apart = (name: string): string => name.normalize("NFD");
+    const names = (dir: string): string[] => readdirSync(dir).filter((name) => name !== ".piecemeal").sort();
+
+    it("takes names with such letters, and does not send them back under another spelling", async () => {
+      const w = setup();
+      w.commitThere({ "한글 노트.md": "한글\n", "폴더/깊은 곳.md": "깊다\n", "café.md": "coffee\n", "plain.md": "plain\n" }, "first");
+      const first = await w.syncPhone(apple(w));
+      assert.deepEqual([...first.downloaded].sort(), ["café.md", "plain.md", "폴더/깊은 곳.md", "한글 노트.md"].sort());
+      // The device spells them its own way
+      assert.deepEqual(names(w.phoneDir), ["café.md", "plain.md", "폴더", "한글 노트.md"].map(apart).sort());
+      assert.equal(w.readPhone(apart("폴더/깊은 곳.md")), "깊다\n");
+
+      const second = await w.syncPhone(apple(w));
+      assert.deepEqual([second.downloaded, second.uploaded, second.deletedHere, second.deletedThere], [[], [], [], []]);
+      assert.deepEqual(w.log(), ["first"]);
+
+      // A change of either side reaches the same file
+      w.writePhone(apart("한글 노트.md"), "한글, 폰에서 고침\n");
+      w.commitThere({ "폴더/깊은 곳.md": "더 깊다\n" }, "change");
+      const third = await w.syncPhone(apple(w));
+      assert.deepEqual([third.uploaded, third.downloaded, third.deletedThere, third.conflicts], [["한글 노트.md"], ["폴더/깊은 곳.md"], [], []]);
+      assert.equal(w.readPhone(apart("폴더/깊은 곳.md")), "더 깊다\n");
+      assert.deepEqual(w.pathsThere(), ["café.md", "plain.md", "폴더/깊은 곳.md", "한글 노트.md"].sort());
+      assert.deepEqual(names(path.join(w.phoneDir, apart("폴더"))), [apart("깊은 곳.md")]);
+    });
+
+    it("sends a new name with its letters in one piece", async () => {
+      const w = setup({ "a.md": "a\n" });
+      await w.syncPhone(apple(w));
+      w.writePhone(apart("새 폴더/새 노트.md"), "새로 썼다\n");
+      const result = await w.syncPhone(apple(w));
+      assert.deepEqual(result.uploaded, ["새 폴더/새 노트.md"]);
+      assert.deepEqual(w.pathsThere(), ["a.md", "새 폴더/새 노트.md"].sort());
+      const again = await w.syncPhone(apple(w));
+      assert.deepEqual([again.uploaded, again.downloaded, again.deletedThere], [[], [], []]);
+
+      // The removal of the file on the device removes that one
+      w.removePhone(apart("새 폴더/새 노트.md"));
+      const removal = await w.syncPhone(apple(w));
+      assert.deepEqual(removal.deletedThere, ["새 폴더/새 노트.md"]);
+      assert.deepEqual(w.pathsThere(), ["a.md"]);
+    });
+
+    it("keeps a name that the repository spells in parts", async () => {
+      const w = setup();
+      const there = apart("분해된 이름.md");
+      w.commitThere({ [there]: "one\n" }, "first");
+      const first = await w.syncPhone(apple(w));
+      assert.deepEqual(first.downloaded, [there]);
+      w.writePhone(there, "two\n");
+      const second = await w.syncPhone(apple(w));
+      assert.deepEqual([second.uploaded, second.deletedThere], [[there], []]);
+      assert.deepEqual(w.pathsThere(), [there]);
+    });
+
+    it("leaves out a file of the remote whose name differs from another in this only", async () => {
+      const w = setup();
+      const whole = "이름.md";
+      w.commitThere({ [whole]: "whole\n", [apart(whole)]: "apart\n" }, "first");
+      const first = await w.syncPhone(apple(w));
+      assert.equal(first.downloaded.length, 1);
+      assert.equal(first.sameName.length, 1);
+      assert.deepEqual(names(w.phoneDir), [apart(whole)]);
+      const second = await w.syncPhone(apple(w));
+      assert.deepEqual([second.uploaded, second.deletedThere, second.downloaded, second.sameName], [[], [], [], []]);
+      assert.deepEqual(w.pathsThere(), [whole, apart(whole)].sort());
     });
   });
 });

@@ -22,11 +22,16 @@ export class TestServer {
 
   /** Runs git in a folder under the root and returns what it prints. */
   git(dir: string, ...args: string[]): string {
+    return this.run(dir, args);
+  }
+
+  private run(dir: string, args: string[], extra: { env?: Record<string, string>; input?: string | Buffer } = {}): string {
     return execFileSync("git", args, {
       cwd: path.join(this.root, dir),
       encoding: "utf8",
+      input: extra.input,
       // What git says beside its result is kept for the message of an error, not printed
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [extra.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         GIT_CONFIG_GLOBAL: "/dev/null",
@@ -35,8 +40,47 @@ export class TestServer {
         GIT_AUTHOR_EMAIL: "test@example.com",
         GIT_COMMITTER_NAME: "Test",
         GIT_COMMITTER_EMAIL: "test@example.com",
+        ...extra.env,
       },
     }).trim();
+  }
+
+  /**
+   * Commits changes straight into the main branch of a repository of the
+   * server, with no files on a disk in between: a path with content is
+   * written, and a path with null is removed.
+   *
+   * This plays a computer that tells "a.md" from "A.md". The disk of most
+   * computers does not, so a clone there can neither hold both names nor
+   * show git that a name changed its capital letters.
+   */
+  commit(name: string, changes: Record<string, string | Buffer | null>, message: string): void {
+    const dir = `${name}.git`;
+    const index = path.join(this.root, `${name}.index`);
+    rmSync(index, { force: true });
+    const git = (args: string[], input?: string | Buffer): string =>
+      // Git on a Mac would take the two spellings of a name for one, and put together the letters of a name it is given
+      this.run(dir, ["-c", "core.ignorecase=false", "-c", "core.precomposeunicode=false", ...args], { env: { GIT_INDEX_FILE: index }, input });
+    let parent: string | null = null;
+    try {
+      parent = git(["rev-parse", "--verify", "-q", "refs/heads/main"]);
+      git(["read-tree", parent]);
+    } catch {
+      // No commit yet
+    }
+    for (const [file, content] of Object.entries(changes)) {
+      if (content === null) {
+        // A line with mode 0 takes the path out, and unlike --remove needs no files on a disk
+        git(["update-index", "--index-info"], `0 ${"0".repeat(40)}\t${file}\n`);
+      } else {
+        const oid = git(["hash-object", "-w", "--stdin"], content);
+        git(["update-index", "--add", "--cacheinfo", `100644,${oid},${file}`]);
+      }
+    }
+    const tree = git(["write-tree"]);
+    const commit = git(["commit-tree", tree, ...(parent === null ? [] : ["-p", parent]), "-m", message]);
+    git(["update-ref", "refs/heads/main", commit]);
+    rmSync(index, { force: true });
   }
 
   /** Makes an empty repository that the server serves, and returns its address. */
