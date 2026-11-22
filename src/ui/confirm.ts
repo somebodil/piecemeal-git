@@ -45,23 +45,26 @@ export class ConfirmModal extends Modal {
         }
       }
     };
+    /** "1 file comes", "3 files come". */
+    const say = (n: number, one: string, many: string): string => `${files(n)} ${n === 1 ? one : many}`;
     if (plan.take > 0) {
-      row(`${files(plan.take)} come from the repository into this vault.`);
+      row(`${say(plan.take, "comes", "come")} from the repository into this vault.`);
     }
     if (plan.send > 0) {
-      row(`${files(plan.send)} of this vault go to the repository.`);
+      row(`${say(plan.send, "goes", "go")} from this vault to the repository.`);
     }
     if (plan.bothChanged.length > 0) {
-      row(
-        `${files(plan.bothChanged.length)} differ on the two sides. Texts are put together where that works out. Otherwise your version stays, and the other one is kept beside it as a copy.`,
-        plan.bothChanged,
-      );
+      // Without a sync before, there is no text as it was to put two versions together from
+      const kept = plan.first
+        ? "Your version stays, and the other one is kept beside it as a copy."
+        : "Texts are put together where that works out. Otherwise your version stays, and the other one is kept beside it as a copy.";
+      row(`${say(plan.bothChanged.length, "differs", "differ")} on the two sides. ${kept}`, plan.bothChanged);
     }
     if (plan.removeHere.length > 0) {
-      row(`${files(plan.removeHere.length)} were removed from the repository, and are removed from this vault.`, plan.removeHere);
+      row(`${say(plan.removeHere.length, "was", "were")} removed from the repository, and will be removed from this vault.`, plan.removeHere);
     }
     if (plan.removeThere.length > 0) {
-      row(`${files(plan.removeThere.length)} are gone from this vault, and are removed from the repository.`, plan.removeThere);
+      row(`${say(plan.removeThere.length, "is", "are")} gone from this vault, and will be removed from the repository.`, plan.removeThere);
     }
     const buttons = contentEl.createDiv({ cls: "piecemeal-git-buttons" });
     new ButtonComponent(buttons).setButtonText("Not now").onClick(() => {
