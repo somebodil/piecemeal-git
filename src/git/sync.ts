@@ -397,13 +397,34 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
     state = parsed;
   }
-  const base = new Map(Object.entries(state.tree));
 
   // --- What the remote holds now --------------------------------------------
   const refs = await lsRefs(http, remote);
-  const branch = options.branch ?? (state.branch !== "" ? state.branch : (refs.head?.slice("refs/heads/".length) ?? "main"));
+  const opensWith = refs.head?.slice("refs/heads/".length);
+  // Without a branch that is asked for: the one of last time while the remote has it, and
+  // then the one that the remote opens with, which is where a branch goes that gets another name
+  const branch =
+    options.branch ??
+    (state.branch !== "" && (refs.heads.has(`refs/heads/${state.branch}`) || opensWith === undefined) ? state.branch : (opensWith ?? "main"));
   const ref = `refs/heads/${branch}`;
-  let tip = refs.heads.get(ref) ?? null;
+  /** The commit that the branch is at on the remote, or null while the remote has no such branch */
+  let refTip = refs.heads.get(ref) ?? null;
+  /** The commit that the vault is held against, and that the commits of this device stand on */
+  let tip = refTip;
+  if (tip === null && state.commit !== null) {
+    if (state.branch !== branch && refs.heads.has(`refs/heads/${state.branch}`)) {
+      // A branch that the remote does not have yet starts where the last sync left off, as with git
+      tip = state.commit;
+      log(`the remote has no branch ${branch}: it starts at ${tip.slice(0, 7)} of ${state.branch}`);
+    } else {
+      // The branch that was synced is gone from the remote. What was agreed on with it says nothing
+      // any more: held against a remote with nothing in it, it would say that every file was removed
+      // there. So it is forgotten, and the vault is sent as a branch that starts anew.
+      log(`the remote has no branch ${branch} any more: it starts anew from what the vault holds`);
+      state = { version: 1, url: remote.url, branch: "", commit: null, tree: {}, stat: {}, absent: {} };
+    }
+  }
+  const base = new Map(Object.entries(state.tree));
 
   const fetchCommit = async (oid: string, have: string | null): Promise<void> => {
     const fetched = await fetchPack(http, remote, {
@@ -897,7 +918,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         };
         const commitOid = await objectId(commit);
         const pack = await writePack([...blobs, ...trees.map(([, tree]) => tree), commit]);
-        await push(http, remote, { ref, oldOid: tip ?? ZERO_OID, newOid: commitOid, pack });
+        await push(http, remote, { ref, oldOid: refTip ?? ZERO_OID, newOid: commitOid, pack });
 
         for (const [oid, tree] of trees) {
           await store.write(tree, oid);
@@ -905,6 +926,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         }
         await store.write(commit, commitOid);
         tip = commitOid;
+        refTip = commitOid;
         thereRoot = built.root;
         log(`sent ${blobs.length} file(s) as ${commitOid.slice(0, 7)}`);
       }
@@ -919,6 +941,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         agreed.delete(path);
         absent.delete(path);
       }
+    }
+
+    if (refTip === null && tip !== null) {
+      // A new branch with nothing to send: it is made all the same, at the commit it starts from
+      await push(http, remote, { ref, oldOid: ZERO_OID, newOid: tip, pack: await writePack([]) });
+      refTip = tip;
     }
 
     // --- Take what the remote changed ---------------------------------------

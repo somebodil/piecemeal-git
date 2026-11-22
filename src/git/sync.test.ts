@@ -694,6 +694,82 @@ describe("sync", () => {
   });
 
   // A phone and most computers take "a.md" and "A.md" for one file. Git does not.
+  describe("with branches", () => {
+    const repo = (w: { url: string }): string => path.basename(w.url);
+    const branches = (w: { url: string }): string[] =>
+      server
+        .git(repo(w), "for-each-ref", "--format=%(refname:short)", "refs/heads")
+        .split("\n")
+        .sort();
+    const files = (w: { phoneDir: string }): string[] => readdirSync(w.phoneDir).filter((name) => name !== ".piecemeal").sort();
+
+    it("starts a branch that the remote does not have where the last sync left off", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+      await w.syncPhone();
+      w.writePhone("draft.md", "a draft\n");
+      const result = await w.syncPhone({ branch: "draft" });
+      assert.deepEqual([result.uploaded, result.deletedHere, result.downloaded], [["draft.md"], [], []]);
+      assert.deepEqual(files(w), ["a.md", "b.md", "draft.md"]);
+      assert.deepEqual(branches(w), ["draft", "main"]);
+      // The new branch has the history of the one it came from, and that one is as it was
+      assert.deepEqual(server.git(repo(w), "log", "--format=%s", "draft").split("\n"), ["from the phone", "first"]);
+      assert.deepEqual(server.git(repo(w), "log", "--format=%s", "main").split("\n"), ["first"]);
+      assert.equal(server.git(repo(w), "fsck", "--strict"), "");
+      const again = await w.syncPhone({ branch: "draft" });
+      assert.deepEqual([again.uploaded, again.downloaded, again.deletedHere], [[], [], []]);
+
+      // With nothing to send the branch is made too
+      const empty = await w.syncPhone({ branch: "second" });
+      assert.deepEqual([empty.uploaded, empty.deletedHere], [[], []]);
+      assert.equal(server.git(repo(w), "rev-parse", "second"), server.git(repo(w), "rev-parse", "draft"));
+    });
+
+    it("goes over to another branch of the remote, and takes along what was not sent yet", async () => {
+      const w = setup({ "a.md": "a\n", "b.md": "b\n" });
+      server.git(repo(w), "branch", "old", "main");
+      w.commitThere({ "a.md": "a of main\n", "b.md": null, "c.md": "c\n" });
+      await w.syncPhone();
+      assert.deepEqual(files(w), ["a.md", "c.md"]);
+      w.writePhone("mine.md", "mine\n");
+      const result = await w.syncPhone({ branch: "old" });
+      assert.deepEqual([result.downloaded.sort(), result.deletedHere, result.uploaded], [["a.md", "b.md"], ["c.md"], ["mine.md"]]);
+      assert.deepEqual([files(w), w.readPhone("a.md")], [["a.md", "b.md", "mine.md"], "a\n"]);
+      assert.deepEqual(server.git(repo(w), "ls-tree", "-r", "--name-only", "old").split("\n"), ["a.md", "b.md", "mine.md"]);
+      assert.deepEqual(server.git(repo(w), "ls-tree", "-r", "--name-only", "main").split("\n"), ["a.md", "c.md"]);
+      // Without a branch that is asked for, it stays with the one of last time
+      const stays = await w.syncPhone();
+      assert.deepEqual([stays.downloaded, stays.deletedHere, stays.uploaded], [[], [], []]);
+    });
+
+    it("follows a branch that got another name on the remote", async () => {
+      const w = setup({ "a.md": "a\n" });
+      await w.syncPhone();
+      server.git(repo(w), "branch", "-m", "main", "trunk");
+      server.git(repo(w), "symbolic-ref", "HEAD", "refs/heads/trunk");
+      w.writePhone("b.md", "b\n");
+      const result = await w.syncPhone();
+      assert.deepEqual([result.uploaded, result.deletedHere, result.downloaded], [["b.md"], [], []]);
+      assert.deepEqual(branches(w), ["trunk"]);
+      assert.deepEqual(server.git(repo(w), "log", "--format=%s", "trunk").split("\n"), ["from the phone", "first"]);
+    });
+
+    it("keeps the vault and sends it anew when the branch is gone from the remote", async () => {
+      const w = setup({ "a.md": "a\n", "dir/b.md": "b\n" });
+      await w.syncPhone({ branch: "main" });
+      // Someone removed the branch. Held against nothing, what was agreed on would say that all was removed there.
+      server.git(repo(w), "update-ref", "-d", "refs/heads/main");
+      w.writePhone("c.md", "c\n");
+      const result = await w.syncPhone({ branch: "main" });
+      assert.deepEqual([result.deletedHere, result.downloaded], [[], []]);
+      assert.deepEqual(result.uploaded.sort(), ["a.md", "c.md", "dir/b.md"]);
+      assert.deepEqual([w.readPhone("a.md"), w.readPhone("dir/b.md"), w.readPhone("c.md")], ["a\n", "b\n", "c\n"]);
+      assert.deepEqual(server.git(repo(w), "ls-tree", "-r", "--name-only", "main").split("\n"), ["a.md", "c.md", "dir/b.md"]);
+      assert.equal(server.git(repo(w), "fsck", "--strict", "--no-dangling"), "");
+      const again = await w.syncPhone({ branch: "main" });
+      assert.deepEqual([again.uploaded, again.downloaded, again.deletedHere], [[], [], []]);
+    });
+  });
+
   describe("in a vault whose files are not always written", () => {
     it("writes a file again that came out empty", async () => {
       const files: Record<string, string> = {};

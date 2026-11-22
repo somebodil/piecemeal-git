@@ -44,6 +44,14 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A link of the repository is a file in the vault that holds where the link points. This is how git keeps a link where links cannot be made, as on a phone. It stays a link in the repository, also when you write another place into it. From a terminal the sync makes real links, and sends a link as a link, without going into a folder that it points to.
 - A file that was left out of the vault is looked at again by every sync, and comes when what kept it out is gone: the other file of its name was removed or renamed, or the limit was raised above its size. As long as it stays out, a sync asks the repository nothing about it and tells you nothing more.
 
+Branches:
+
+- The sync is with one branch: the one that the settings name, or else the one of the last sync, or else the one that the repository opens with.
+- When you name another branch that the remote has, the vault goes over to it: it takes what that branch has otherwise, and what you had not sent yet goes onto that branch.
+- When you name a branch that the remote does not have, the branch is made where the last sync left off, with the history up to there, as `git switch -c` and a push would.
+- When the branch of the last sync got another name on the remote and the settings name none, the sync goes on with the branch that the repository opens with now.
+- When the branch is gone from the remote, the vault stays as it is and is sent anew, as a branch without a history. Nothing is removed from the vault because of it.
+
 Files that are too large:
 
 - A new file above the limit (20 MB unless you change it) is not sent. Its path is written into a part of `.gitignore` that the plugin keeps, between two marker lines, and you are told. The file stays in the vault.
