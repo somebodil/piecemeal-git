@@ -247,6 +247,9 @@ interface Looked {
   scanned: Map<string, FileStat>;
 }
 
+/** A path that has `.git` as one of its names, in whatever case, as git itself looks for it */
+const DOT_GIT = /(?:^|\/)\.git(?:\/|$)/i;
+
 /** Endings of names of files that are text, and with that mostly small */
 const TEXT_KINDS = new Set(["md", "txt", "json", "canvas", "base", "css", "js", "ts", "yaml", "yml", "csv", "html", "xml", "svg", ""]);
 
@@ -454,8 +457,9 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   const excluded = (path: string, isDir: boolean): boolean =>
     path === options.storeDir ||
     path.startsWith(`${options.storeDir}/`) ||
-    path === ".git" ||
-    path.startsWith(".git/") ||
+    // At the top of the vault or in any folder of it: what git keeps there is not a part of what
+    // it tracks, and no server takes a commit with such a name in it
+    DOT_GIT.test(path) ||
     (options.exclude?.(path, isDir) ?? false);
 
   // --- How the vault spells its names ----------------------------------------
@@ -813,6 +817,51 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
   }
 
+  /** The sizes of contents that the remote holds, by their ids, as far as they were asked for and told */
+  const knownSizes = new Map<string, number>();
+  let hostAsked = false;
+  /** Null until the server was asked whether it tells sizes */
+  let serverTells: boolean | null = null;
+  const askedFor = new Set<string>();
+  /**
+   * Asks for the sizes of contents of the remote, where they are not known
+   * yet. The host is asked for all of them at once, in its own way. A server
+   * is asked as git asks, which few servers answer.
+   */
+  const sizesFor = async (oids: string[]): Promise<Map<string, number>> => {
+    if (options.sizes !== undefined) {
+      if (!hostAsked) {
+        hostAsked = true;
+        if (thereRoot !== null) {
+          for (const [oid, size] of await options.sizes(thereRoot)) {
+            knownSizes.set(oid, size);
+          }
+        }
+      }
+      return knownSizes;
+    }
+    const missing = oids.filter((oid) => !askedFor.has(oid));
+    if (missing.length > 0 && serverTells !== false) {
+      try {
+        serverTells ??= (await capabilities(http, remote)).has("object-info");
+        if (serverTells) {
+          for (const [oid, size] of await objectSizes(http, remote, missing)) {
+            knownSizes.set(oid, size);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof RemoteError)) {
+          throw error;
+        }
+        serverTells = false;
+      }
+      for (const oid of missing) {
+        askedFor.add(oid);
+      }
+    }
+    return knownSizes;
+  };
+
   const here = new Map<string, Entry>();
   const stats = new Map<string, FileStat>();
   /**
@@ -829,6 +878,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
    * size to the byte. Such a file is too large to read and see what it holds.
    */
   const moved = new Map<string, Entry>();
+  /**
+   * Files above the limit that the remote has otherwise under the same name,
+   * and that were never agreed on. `sizeKnown` is true if the size of the one
+   * of the remote is known, so that it can be taken piece by piece. `stat` is
+   * the size and time of the one of the vault, as the scan found them.
+   */
+  const largeOther = new Map<string, { sizeKnown: boolean; stat: FileStat }>();
   /** True if the paths of files that are too large were added to the `.gitignore` of the remote, and not to one of the vault */
   let addedToTheirs = false;
   {
@@ -852,14 +908,32 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         gone.set(before.size, [...(gone.get(before.size) ?? []), path]);
       }
     }
+    /** Files above the limit that were never agreed on, and that the remote has a file for under the same name */
+    const largeOnBoth: string[] = [];
     for (const path of found) {
       const stat = scanned.get(path);
       if (stat !== undefined && stat.size > options.maxFileBytes && !base.has(path)) {
         const was = gone.get(stat.size)?.shift();
         if (was !== undefined) {
           moved.set(path, base.get(was)!);
+        } else if (there.has(path) && isFile(there.get(path)!)) {
+          largeOnBoth.push(path);
         } else {
           tooLarge.push(path);
+        }
+      }
+    }
+    if (largeOnBoth.length > 0) {
+      // Too large to read and see what it holds, as a file that got another name is. If it has,
+      // to the byte, the size of the file of the remote, it is taken for that file. It is no new
+      // file in any case, and is not written into `.gitignore`: the repository tracks it.
+      const sizes = await sizesFor(largeOnBoth.map((path) => there.get(path)!.oid));
+      for (const path of largeOnBoth) {
+        const theirs = there.get(path)!;
+        if (sizes.get(theirs.oid) === scanned.get(path)!.size) {
+          moved.set(path, theirs);
+        } else {
+          largeOther.set(path, { sizeKnown: sizes.has(theirs.oid), stat: scanned.get(path)! });
         }
       }
     }
@@ -881,7 +955,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       }
       log(`${tooLarge.length} file(s) are too large to send and were written into .gitignore`);
     }
-    const skip = new Set(tooLarge);
+    const skip = new Set([...tooLarge, ...largeOther.keys()]);
 
     /** True if a file has the size and time that it had when it was agreed on, so that it need not be read */
     const asItWas = (path: string, stat: FileStat): boolean => {
@@ -1033,6 +1107,21 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     if (path === ".gitignore" && addedToTheirs) {
       // What the vault holds of it is the one of the remote, with the files that are too large added
       uploads.push(path);
+      continue;
+    }
+    const tooLargeHere = largeOther.get(path);
+    if (tooLargeHere !== undefined) {
+      const theirs = there.get(path);
+      if (first && tooLargeHere.sizeKnown && theirs !== undefined) {
+        // Never synced with this remote: the remote is right, as for any file that differs
+        downloads.push({ path, entry: theirs });
+        replaced.add(path);
+        // So that it is seen afterwards if the file changed while the sync ran
+        stats.set(path, tooLargeHere.stat);
+      } else {
+        // Too large to send, and not to be taken without knowing how large it is: both stay as they are
+        result.tooLargeChanged.push(path);
+      }
       continue;
     }
     const b = base.get(path);
@@ -1454,28 +1543,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
 
     if (downloads.length > 0) {
       // Asked for when the first file needs it. A sync that only looks again at files that stay out asks nothing.
-      let sizes: Map<string, number> | null = null;
-      const sizeOf = async (oid: string): Promise<number | undefined> => {
-        if (sizes === null) {
-          if (options.sizes !== undefined) {
-            sizes = thereRoot === null ? new Map<string, number>() : await options.sizes(thereRoot);
-          } else {
-            // Git has a way to ask for sizes too, and a server says if it offers it. Few do.
-            sizes = new Map<string, number>();
-            try {
-              if ((await capabilities(http, remote)).has("object-info")) {
-                const oids = new Set(downloads.filter(({ entry }) => isFile(entry)).map(({ entry }) => entry.oid));
-                sizes = await objectSizes(http, remote, [...oids]);
-              }
-            } catch (error) {
-              if (!(error instanceof RemoteError)) {
-                throw error;
-              }
-            }
-          }
-        }
-        return sizes.get(oid);
-      };
+      const toTake = [...new Set(downloads.filter(({ entry }) => isFile(entry)).map(({ entry }) => entry.oid))];
+      const sizeOf = async (oid: string): Promise<number | undefined> => (await sizesFor(toTake)).get(oid);
       /** The paths that wait for the content with an id */
       const wanted = new Map<string, { path: string; entry: Entry }[]>();
       /** `tooLarge` is the size of a file that stays out of the vault because of it */

@@ -590,6 +590,62 @@ describe("sync", () => {
     assert.deepEqual(other.tooLargeIgnored, ["other.mp4"]);
   });
 
+  it("takes a file above the limit that both sides have for the same file, and does not write it into .gitignore", async () => {
+    const w = setup({ "big.pdf": Buffer.alloc(50_000, 7), "other.pdf": Buffer.alloc(40_000, 3), "a.md": "a\n" });
+    // A vault that has the files already, as after another kind of sync
+    w.writePhone("big.pdf", Buffer.alloc(50_000, 7));
+    w.writePhone("other.pdf", Buffer.alloc(41_000, 4));
+    w.writePhone("a.md", "a\n");
+    const fs = new NodeFs(w.phoneDir);
+    const taken: string[] = [];
+    const largeBlob: SyncOptions["largeBlob"] = async (file, to) => {
+      taken.push(to);
+      await fs.write(to, Buffer.alloc(file.size, 3));
+      return true;
+    };
+    const result = await w.syncPhone({ largeBlob });
+    // The one of the same size is the same file. The other one differs, and at a first sync the remote is right.
+    assert.deepEqual([result.tooLargeIgnored, result.uploaded, result.downloaded, result.replaced, taken], [[], [], ["other.pdf"], ["other.pdf"], ["other.pdf"]]);
+    assert.equal(w.readPhone(".gitignore"), null);
+    assert.deepEqual(w.pathsThere(), ["a.md", "big.pdf", "other.pdf"]);
+    assert.deepEqual(w.log(), ["first"]);
+    assert.equal(statSync(path.join(w.phoneDir, "other.pdf")).size, 40_000);
+    const again = await w.syncPhone({ largeBlob });
+    assert.deepEqual([again.uploaded, again.downloaded, again.tooLargeChanged, again.tooLargeIgnored], [[], [], [], []]);
+
+    // Later, a file that both sides made under one name: neither is sent nor taken over the other
+    w.pullPc();
+    w.writePc("late.pdf", Buffer.alloc(30_000, 1));
+    w.pushPc();
+    w.writePhone("late.pdf", Buffer.alloc(31_000, 2));
+    const late = await w.syncPhone({ largeBlob });
+    assert.deepEqual([late.tooLargeChanged, late.tooLargeIgnored, late.uploaded, late.downloaded], [["late.pdf"], [], [], []]);
+    assert.equal(statSync(path.join(w.phoneDir, "late.pdf")).size, 31_000);
+    assert.equal(w.readPhone(".gitignore"), null);
+  });
+
+  it("leaves out what git keeps in a folder of the vault, as it does at the top", async () => {
+    const w = setup({ "a.md": "a\n", "project/readme.md": "a project\n" });
+    await w.syncPhone();
+    // A folder that is a repository of its own, a file of that name, and the name in other letters
+    w.writePhone("project/.git/HEAD", "ref: refs/heads/main\n");
+    w.writePhone("project/.git/objects/ab/cdef", "an object\n");
+    w.writePhone("project/deeper/.git", "gitdir: /somewhere/else\n");
+    w.writePhone("other/.GIT/config", "[core]\n");
+    w.writePhone(".git/HEAD", "ref: refs/heads/main\n");
+    w.writePhone("project/new.md", "new\n");
+    w.writePhone("project/.gitattributes", "* text=auto\n");
+    w.writePhone("project/git/notes.md", "not what git keeps\n");
+    const result = await w.syncPhone();
+    assert.deepEqual(result.uploaded.sort(), ["project/.gitattributes", "project/git/notes.md", "project/new.md"]);
+    assert.deepEqual(w.pathsThere(), ["a.md", "project/.gitattributes", "project/git/notes.md", "project/new.md", "project/readme.md"]);
+    assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    // They stay in the vault
+    assert.equal(w.readPhone("project/.git/HEAD"), "ref: refs/heads/main\n");
+    const again = await w.syncPhone();
+    assert.deepEqual([again.uploaded, again.downloaded, again.deletedThere], [[], [], []]);
+  });
+
   it("joins the remote anew when what was agreed on cannot be read", async () => {
     const w = setup({ "a.md": "a\n", "b.md": "b\n" });
     await w.syncPhone();
