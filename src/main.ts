@@ -3,14 +3,15 @@ import { VerifiedFs } from "./git/fs.ts";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { parsePack } from "./git/pack.ts";
 import { fetchPack, remoteOf } from "./git/protocol.ts";
-import { CancelledError, type Entry, type LocalChange, localChanges, type Progress, sync, type SyncOptions, type SyncResult } from "./git/sync.ts";
+import { CancelledError, type Entry, type LocalChange, localChanges, type Progress, revert, sync, type SyncOptions, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
+import { AskModal } from "./ui/ask.ts";
 import { ConfirmModal } from "./ui/confirm.ts";
 import { DiffModal } from "./ui/diff.ts";
 import { conflictCopies, isCopy, type Report, ReportModal, SyncView, VIEW_TYPE } from "./ui/report.ts";
 import { SettingsTab } from "./ui/settings.ts";
 import { DEFAULTS, type DeviceState, type Last, readStored, type Settings, SETTINGS_KEY, STATE_KEY } from "./ui/stored.ts";
-import { ago, concerns, explain, headline, notes, progressText, restart, worthAsking } from "./ui/words.ts";
+import { ago, concerns, explain, headline, list, notes, progressText, restart, worthAsking } from "./ui/words.ts";
 
 const MB = 1024 * 1024;
 /** Where the plugin keeps the commits, the folders and what it last agreed on */
@@ -537,18 +538,93 @@ export default class PiecemealGitPlugin extends Plugin {
     return this.common().fs.read(path);
   }
 
-  /** Shows what changed in a file since the last sync. */
+  /** Shows what changed in a file since the last sync, with what takes the change back: all of it, or some of it. */
   openDiff(change: LocalChange): void {
     const nothing = new Uint8Array(0);
     new DiffModal(this.app, {
       title: change.path,
       what: change.kind === "new" ? "A new file." : change.kind === "removed" ? "Removed from this vault." : "Changed since the last sync.",
+      legend:
+        change.kind === "changed"
+          ? "− is a line as it was at the last sync, + one as it is now. For each change, what is green is kept. Saving puts that into the file."
+          : undefined,
       waiting: change.kind === "new" ? "Reading the file…" : "Asking the repository for the file as it was…",
       beforeSize: change.beforeSize,
       afterSize: change.size,
       before: async () => (change.before === null ? nothing : await this.contentBefore(change.before)),
       after: async () => (change.kind === "removed" ? nothing : ((await this.contentNow(change.path)) ?? nothing)),
+      actions: [
+        {
+          text: change.kind === "new" ? "Revert: remove the file" : change.kind === "removed" ? "Revert: bring the file back" : "Revert the whole file",
+          run: async () => {
+            await this.revert([change], false);
+          },
+        },
+      ],
+      choose:
+        change.kind === "changed"
+          ? {
+              before: "As it was",
+              after: "Mine",
+              start: 1,
+              save: async (text) => {
+                await this.put(change.path, new TextEncoder().encode(text));
+                new Notice(`${change.path} holds what you chose. What it held went where Obsidian puts files that you delete.`);
+              },
+            }
+          : undefined,
     }).open();
+  }
+
+  /** Writes a file of the vault in place of what it holds. What it held goes where Obsidian puts files that are deleted, where it has a place for it. */
+  private async put(path: string, data: Uint8Array): Promise<void> {
+    const { fs } = this.common();
+    if ((await fs.stat(path)) !== null) {
+      await fs.discard?.(path);
+    }
+    await fs.write(path, data);
+    this.changedSince();
+  }
+
+  /**
+   * Takes changes back to what the vault held at the last sync, after
+   * asking: a changed file holds again what it held, a new file goes, and a
+   * removed one is there again.
+   *
+   * @param ask false where the person has pressed a button that says what is done
+   * @returns true if it was done
+   */
+  async revert(changes: LocalChange[], ask = true): Promise<boolean> {
+    if (changes.length === 0 || this.running) {
+      return false;
+    }
+    if (
+      ask &&
+      !(await new AskModal(this.app, {
+        title: changes.length === 1 ? "Revert this file?" : `Revert these ${changes.length} files?`,
+        text: "They are put back to what they were at the last sync: a changed file holds what it held then, a new file is removed, and a removed file is there again. What a note holds now goes where Obsidian puts files that you delete.",
+        paths: changes.map((change) => `${change.kind}: ${change.path}`),
+        yes: "Revert",
+      }).ask())
+    ) {
+      return false;
+    }
+    try {
+      const { reverted, left } = await revert(this.common().options, changes);
+      const said = [`Reverted ${reverted.length === 1 ? reverted[0] : `${reverted.length} files`}.`];
+      if (left.length > 0) {
+        said.push(`Left as it is, too large to be had back in one piece: ${list(left)}.`);
+      }
+      new Notice(said.join(" "));
+    } catch (error) {
+      console.error("piecemeal-git: the files could not be reverted", error);
+      new Notice(`The files could not be reverted. ${explain(error)}`, 0);
+      return false;
+    } finally {
+      this.changedSince();
+      void this.look();
+    }
+    return true;
   }
 
   /**
@@ -590,6 +666,7 @@ export default class PiecemealGitPlugin extends Plugin {
       choose: {
         before: "Repository's",
         after: "The copy's",
+        start: 0,
         save: async (text) => {
           if (await this.takeCopy(copy, original, new TextEncoder().encode(text).buffer)) {
             new Notice(`${original} holds what you chose, and the copy is gone. The next sync sends it.`);

@@ -38,6 +38,8 @@ export class Report {
   private progressEl: HTMLElement | null = null;
   /** Where it says how long ago the last sync was. Null while there is none to tell of. */
   private agoEl: HTMLElement | null = null;
+  /** The paths of the changed files that are ticked, to be reverted together */
+  private readonly ticked = new Set<string>();
 
   constructor(app: App, plugin: PiecemealGitPlugin, el: HTMLElement, leave: () => void) {
     this.app = app;
@@ -118,10 +120,63 @@ export class Report {
       el.createEl("p", { text: "Nothing. The vault is as the last sync left it.", cls: "piecemeal-git-note" });
       return;
     }
-    el.createEl("p", { text: "Press a file to see what changed in it. The next sync sends these.", cls: "piecemeal-git-note" });
+    el.createEl("p", {
+      text: "Press a file to see what changed in it. The next sync sends these. To take some back, tick them and revert.",
+      cls: "piecemeal-git-note",
+    });
+    // What is ticked stays ticked while the list is drawn anew, as long as the file is still on it
+    const paths = new Set(changes.map((change) => change.path));
+    for (const path of this.ticked) {
+      if (!paths.has(path)) {
+        this.ticked.delete(path);
+      }
+    }
+    const shown = changes.slice(0, 300);
+    const bar = el.createDiv({ cls: "piecemeal-git-revert" });
+    const all = bar.createEl("label");
+    const allBox = all.createEl("input", { type: "checkbox" });
+    all.appendText(" All");
+    const button = new ButtonComponent(bar).onClick(async () => {
+      const chosen = changes.filter((change) => this.ticked.has(change.path));
+      if (await plugin.revert(chosen)) {
+        this.ticked.clear();
+      }
+    });
+    button.buttonEl.addClass("mod-warning");
+    const boxes: HTMLInputElement[] = [];
+    /** Brings the button and the box for all up to what is ticked. Costs two texts, however long the list is. */
+    const tell = (): void => {
+      const count = this.ticked.size;
+      button.setButtonText(count === 0 ? "Revert" : `Revert (${count})`).setDisabled(count === 0 || plugin.running);
+      allBox.checked = count > 0 && count === shown.length;
+      allBox.indeterminate = count > 0 && count < shown.length;
+    };
+    allBox.addEventListener("change", () => {
+      const on = allBox.checked;
+      shown.forEach((change, i) => {
+        if (on) {
+          this.ticked.add(change.path);
+        } else {
+          this.ticked.delete(change.path);
+        }
+        boxes[i].checked = on;
+      });
+      tell();
+    });
     const rows = el.createEl("ul", { cls: "piecemeal-git-changes" });
-    for (const change of changes.slice(0, 300)) {
+    for (const change of shown) {
       const item = rows.createEl("li");
+      const box = item.createEl("input", { type: "checkbox" });
+      box.checked = this.ticked.has(change.path);
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          this.ticked.add(change.path);
+        } else {
+          this.ticked.delete(change.path);
+        }
+        tell();
+      });
+      boxes.push(box);
       item.createSpan({ text: change.kind, cls: `piecemeal-git-kind piecemeal-git-kind-${change.kind}` });
       const link = item.createEl("a", { text: change.path, cls: "piecemeal-git-path" });
       link.addEventListener("click", () => {
@@ -129,8 +184,9 @@ export class Report {
       });
     }
     if (changes.length > 300) {
-      rows.createEl("li", { text: `and ${changes.length - 300} more` });
+      rows.createEl("li", { text: `and ${changes.length - 300} more. They show when these are done with.` });
     }
+    tell();
   }
 
   /** Says how far the sync is that runs. Costs one text, so it can be told often. */

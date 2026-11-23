@@ -25,7 +25,7 @@ import { TestServer } from "../../tests/server.ts";
 import { type FileStat, VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";
-import { CancelledError, type LocalChanges, localChanges, type Plan, sync, type SyncOptions, type SyncResult } from "./sync.ts";
+import { CancelledError, type LocalChanges, localChanges, type Plan, revert, sync, type SyncOptions, type SyncResult } from "./sync.ts";
 
 describe("sync", () => {
   const server = new TestServer();
@@ -696,6 +696,74 @@ describe("sync", () => {
       (await w.changesPhone()).changes.map((change) => change.path),
       ["big.bin"],
     );
+  });
+
+  it("takes changes of the vault back to what it held at the last sync", async () => {
+    const w = setup({
+      "a.md": "a\n",
+      "dir/b.md": "b\n",
+      "dir/c.md": "c\n",
+      "keep.md": "keep\n",
+      "dir/same as c.md": "c\n",
+      "big.bin": Buffer.alloc(20_000, 1),
+    });
+    const fs = new NodeFs(w.phoneDir) as NodeFs & { discard?: (file: string) => Promise<void> };
+    const largeBlob: SyncOptions["largeBlob"] = async (file, to) => {
+      await fs.write(to, Buffer.alloc(file.size, 1));
+      return true;
+    };
+    await w.syncPhone({ largeBlob });
+    w.writePhone("a.md", "a, changed\n");
+    w.writePhone("keep.md", "keep, changed and not taken back\n");
+    w.writePhone("new dir/deep/new.md", "new\n");
+    w.removePhone("dir/c.md");
+    w.removePhone("dir/same as c.md");
+    w.writePhone("big.bin", Buffer.alloc(21_000, 2));
+    const { changes } = await w.changesPhone();
+    assert.deepEqual(
+      changes.map((change) => change.path),
+      ["a.md", "big.bin", "dir/c.md", "dir/same as c.md", "keep.md", "new dir/deep/new.md"],
+    );
+    // What gives way goes where it can be had back
+    const discarded: Record<string, string | null> = {};
+    fs.discard = async (file) => {
+      discarded[file] = w.readPhone(file);
+      await fs.remove(file);
+    };
+    let asked = 0;
+    const options = w.options({
+      fs,
+      http: (request) => {
+        asked++;
+        return nodeHttp(request);
+      },
+    });
+    const { reverted, left } = await revert(
+      options,
+      changes.filter((change) => change.path !== "keep.md"),
+    );
+    assert.deepEqual([reverted, left], [["a.md", "dir/c.md", "dir/same as c.md", "new dir/deep/new.md"], ["big.bin"]]);
+    assert.deepEqual([w.readPhone("a.md"), w.readPhone("dir/c.md"), w.readPhone("dir/same as c.md"), w.readPhone("new dir/deep/new.md")], ["a\n", "c\n", "c\n", null]);
+    assert.deepEqual(discarded, { "a.md": "a, changed\n", "new dir/deep/new.md": "new\n" });
+    // The folders that the new file was in are gone with it, and what the files held came in one request
+    assert.equal(existsSync(path.join(w.phoneDir, "new dir")), false);
+    assert.equal(asked, 1);
+    assert.deepEqual(
+      (await w.changesPhone()).changes.map((change) => change.path),
+      ["big.bin", "keep.md"],
+    );
+    // The next sync sends what was not taken back, and nothing else
+    const result = await w.syncPhone({ largeBlob });
+    assert.deepEqual([result.uploaded, result.downloaded, result.deletedThere, result.tooLargeChanged], [["keep.md"], [], [], ["big.bin"]]);
+    w.pullPc();
+    assert.deepEqual([w.readPc("a.md"), w.readPc("dir/c.md"), w.readPc("keep.md")], ["a\n", "c\n", "keep, changed and not taken back\n"]);
+    assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+
+    // Without a network nothing is touched
+    w.writePhone("a.md", "a, changed again\n");
+    const again = (await w.changesPhone()).changes.filter((change) => change.path === "a.md");
+    await assert.rejects(revert(w.options({ http: () => Promise.reject(new Error("no network")) }), again), /no network/);
+    assert.equal(w.readPhone("a.md"), "a, changed again\n");
   });
 
   it("leaves out what git keeps in a folder of the vault, as it does at the top", async () => {

@@ -461,6 +461,95 @@ export async function localChanges(options: SyncOptions): Promise<LocalChanges> 
   return local;
 }
 
+/**
+ * Takes changes of the vault back: a file that was changed holds again what
+ * it held at the last sync, a new file goes, and one that was removed is
+ * there again. What a file held is asked of the remote, since the device
+ * does not keep it. What gives way goes where a person can get it back,
+ * where there is such a place.
+ *
+ * @returns the paths that were taken back, and the ones that were left as
+ *   they are because what they held is too large to be had in one piece
+ */
+export async function revert(options: SyncOptions, changes: LocalChange[]): Promise<{ reverted: string[]; left: string[] }> {
+  const { fs, http, remote } = options;
+  const reverted: string[] = [];
+  const left: string[] = [];
+  const away = async (path: string): Promise<void> => {
+    if ((await fs.stat(path)) !== null) {
+      await (fs.discard === undefined ? fs.remove(path) : fs.discard(path));
+    }
+  };
+  // What the files held is asked for first, a few megabytes at a time, and nothing is touched before it is there
+  const wanted = changes.filter((change) => change.before !== null && (change.beforeSize ?? 0) <= options.maxFileBytes);
+  for (const change of changes) {
+    if (change.before !== null && !wanted.includes(change)) {
+      left.push(change.path);
+    }
+  }
+  const held = new Map<string, Uint8Array>();
+  let batch: string[] = [];
+  let bytes = 0;
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) {
+      return;
+    }
+    const fetched = await fetchPack(http, remote, { wants: batch });
+    for (const object of await parsePack(fetched.pack)) {
+      if (object.type === "blob") {
+        held.set(object.oid, object.data);
+      }
+    }
+    batch = [];
+    bytes = 0;
+  };
+  for (const change of wanted) {
+    const { oid } = change.before!;
+    if (held.has(oid) || batch.includes(oid)) {
+      continue;
+    }
+    const size = change.beforeSize ?? 0;
+    if (batch.length > 0 && bytes + size > options.batchBytes) {
+      await flush();
+    }
+    batch.push(oid);
+    bytes += size;
+  }
+  await flush();
+
+  const emptied = new Set<string>();
+  for (const change of changes) {
+    if (change.before === null) {
+      await away(change.path);
+      for (let dir = folderOf(change.path); dir !== ""; dir = folderOf(dir)) {
+        emptied.add(dir);
+      }
+      reverted.push(change.path);
+      continue;
+    }
+    const data = held.get(change.before.oid);
+    if (data === undefined) {
+      if (!left.includes(change.path)) {
+        throw new Error(`The server did not send ${change.path} as it was.`);
+      }
+      continue;
+    }
+    // What the file holds now makes room first, so that it can be had back
+    await away(change.path);
+    if (change.before.mode === MODE_LINK && fs.writeLink !== undefined) {
+      await fs.writeLink(change.path, decode(data));
+    } else {
+      await fs.write(change.path, data);
+    }
+    reverted.push(change.path);
+  }
+  // A folder that lost its last file goes too, the innermost first
+  for (const dir of [...emptied].sort((a, b) => b.length - a.length)) {
+    await fs.removeDir(dir);
+  }
+  return { reverted, left };
+}
+
 function emptyResult(): SyncResult {
   return {
     commit: null,

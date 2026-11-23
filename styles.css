@@ -297,3 +297,17 @@
   opacity: 0.45;
   text-decoration: line-through;
 }
+
+/* The row above the list of what changed: a box that ticks all, and the button that reverts what is ticked. */
+.piecemeal-git-revert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  margin: var(--size-2-2) 0;
+}
+
+.piecemeal-git-changes > li > input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+}

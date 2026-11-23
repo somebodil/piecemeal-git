@@ -28,6 +28,8 @@ export interface Comparison {
     /** What the two versions are called on the buttons of a change: the one before, and the one after */
     before: string;
     after: string;
+    /** Which version every change starts with: 0 for the one before, 1 for the one after */
+    start: 0 | 1;
     save: (text: string) => Promise<void>;
   };
 }
@@ -157,9 +159,10 @@ export class DiffModal extends Modal {
 
     // --- Which version to keep, change by change ------------------------------
     /** For each change: 0 for the version before, 1 for the one after, 2 for both */
-    const choices = new Uint8Array(diffed.changes.length);
-    /** How many changes take the version after, and how many both */
-    const taken = [diffed.changes.length, 0, 0];
+    const choices = new Uint8Array(diffed.changes.length).fill(choose?.start ?? 0);
+    /** How many changes take the version before, how many the one after, and how many both */
+    const taken = [0, 0, 0];
+    taken[choose?.start ?? 0] = diffed.changes.length;
     /** The box of each change that is drawn: its rows are in it, so that a choice restyles them in one step */
     const boxes = new Map<number, HTMLElement>();
     let tally: HTMLElement | null = null;
