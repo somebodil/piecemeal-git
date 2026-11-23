@@ -63,6 +63,12 @@ const WRITE_ATTEMPTS = 3;
  */
 export class VerifiedFs implements Fs {
   private readonly inner: Fs;
+  /**
+   * The size and time of the file that was written last, as the look at it
+   * found them. Who asks for them right after the write is told, and the
+   * device is not asked a second time.
+   */
+  private written: { path: string; stat: FileStat } | null = null;
   /** How many writes had to be done again */
   rewritten = 0;
   readLink?: (path: string) => Promise<string | null>;
@@ -76,19 +82,28 @@ export class VerifiedFs implements Fs {
       this.quickStat = (path) => inner.quickStat!(path);
     }
     if (inner.discard !== undefined) {
-      this.discard = (path) => inner.discard!(path);
+      this.discard = (path) => {
+        this.written = null;
+        return inner.discard!(path);
+      };
     }
     if (inner.readLink !== undefined && inner.writeLink !== undefined) {
       this.readLink = (path) => inner.readLink!(path);
-      this.writeLink = (path, target) => inner.writeLink!(path, target);
+      this.writeLink = (path, target) => {
+        this.written = null;
+        return inner.writeLink!(path, target);
+      };
     }
   }
 
   async write(path: string, data: Uint8Array): Promise<void> {
     for (let attempt = 1; ; attempt++) {
+      this.written = null;
       await this.inner.write(path, data);
-      const size = (await this.inner.stat(path))?.size;
-      if (size === data.length) {
+      const stat = await this.inner.stat(path);
+      const size = stat?.size;
+      if (stat !== null && size === data.length) {
+        this.written = { path, stat };
         return;
       }
       if (attempt === WRITE_ATTEMPTS) {
@@ -103,10 +118,12 @@ export class VerifiedFs implements Fs {
   }
 
   append(path: string, data: Uint8Array): Promise<void> {
+    this.written = null;
     return this.inner.append(path, data);
   }
 
   remove(path: string): Promise<void> {
+    this.written = null;
     return this.inner.remove(path);
   }
 
@@ -115,10 +132,19 @@ export class VerifiedFs implements Fs {
   }
 
   rename(from: string, to: string): Promise<void> {
+    this.written = null;
     return this.inner.rename(from, to);
   }
 
   stat(path: string): Promise<FileStat | null> {
+    const { written } = this;
+    if (written !== null) {
+      // Told once only: whoever asks later gets what the device says then
+      this.written = null;
+      if (written.path === path) {
+        return Promise.resolve(written.stat);
+      }
+    }
     return this.inner.stat(path);
   }
 

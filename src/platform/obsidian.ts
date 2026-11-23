@@ -54,10 +54,16 @@ export class ObsidianFs implements Fs {
   }
 
   async read(path: string): Promise<Uint8Array | null> {
-    if (!(await this.adapter.exists(path))) {
+    // Asked once for a file that is there, which most are. Only a read that fails is asked why:
+    // a file that is not there is no failure, and one that cannot be read must not pass for one that is gone.
+    try {
+      return new Uint8Array(await this.adapter.readBinary(path));
+    } catch (error) {
+      if (await this.adapter.exists(path)) {
+        throw error;
+      }
       return null;
     }
-    return new Uint8Array(await this.adapter.readBinary(path));
   }
 
   async write(path: string, data: Uint8Array): Promise<void> {
@@ -105,10 +111,16 @@ export class ObsidianFs implements Fs {
   }
 
   async list(dir: string): Promise<{ files: string[]; dirs: string[] }> {
-    if (dir !== "" && !(await this.adapter.exists(dir))) {
+    let listed: { files: string[]; folders: string[] };
+    try {
+      listed = await this.adapter.list(dir === "" ? "/" : dir);
+    } catch (error) {
+      // As with a file: asked once where the folder is there, and why only where the listing failed
+      if (dir === "" || (await this.adapter.exists(dir))) {
+        throw error;
+      }
       return { files: [], dirs: [] };
     }
-    const listed = await this.adapter.list(dir === "" ? "/" : dir);
     const name = (path: string): string => path.slice(path.lastIndexOf("/") + 1);
     return { files: listed.files.map(name), dirs: listed.folders.map(name) };
   }

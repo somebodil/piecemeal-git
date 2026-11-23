@@ -190,6 +190,56 @@ const RACY_MS = 3000;
 /** How often a sync starts over because another device moved the branch in the meantime */
 const ATTEMPTS = 3;
 
+/**
+ * How many things the files of the vault are asked at once. On a phone each
+ * answer takes its time whatever is asked, and the answers do not wait for
+ * one another.
+ */
+const AT_ONCE = 8;
+
+/** A file up to this size is read while others are read. A larger one is read alone, so that not much is held at a time. */
+const SMALL_BYTES = 256 * 1024;
+
+/** Lets a few jobs run at once, and the others wait for their turn. */
+class Gate {
+  private free: number;
+  private readonly waiting: (() => void)[] = [];
+
+  constructor(atOnce: number) {
+    this.free = atOnce;
+  }
+
+  async run<T>(job: () => Promise<T>): Promise<T> {
+    if (this.free > 0) {
+      this.free--;
+    } else {
+      // Whoever is done hands its turn on, so the count stays as it is
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    }
+    try {
+      return await job();
+    } finally {
+      const next = this.waiting.shift();
+      if (next === undefined) {
+        this.free++;
+      } else {
+        next();
+      }
+    }
+  }
+}
+
+/** What a look at the vault finds. */
+interface Looked {
+  /** The text of the `.gitignore` at the top, or "" if there is none */
+  gitignore: string;
+  /** The paths of the files that the sync is about */
+  found: string[];
+  seen: Set<string>;
+  /** The size and time of each of them that is there */
+  scanned: Map<string, FileStat>;
+}
+
 /** Endings of names of files that are text, and with that mostly small */
 const TEXT_KINDS = new Set(["md", "txt", "json", "canvas", "base", "css", "js", "ts", "yaml", "yml", "csv", "html", "xml", "svg", ""]);
 
@@ -431,15 +481,23 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     const known = spelling.get(join(dir, name).normalize("NFC"));
     return known !== undefined && folderOf(known) === dir ? known.slice(dir === "" ? 0 : dir.length + 1) : name.normalize("NFC");
   };
+  const gate = new Gate(AT_ONCE);
   const listings = new Map<string, { files: Set<string>; dirs: Set<string> }>();
-  const listing = async (dir: string): Promise<{ files: Set<string>; dirs: Set<string> }> => {
-    let listed = listings.get(dir);
-    if (listed === undefined) {
-      const { files, dirs } = await fs.list(dir);
-      listed = { files: new Set(files.map((name) => named(dir, name))), dirs: new Set(dirs.map((name) => named(dir, name))) };
-      listings.set(dir, listed);
+  /** The folders that are asked about or were, so that each is asked once also when two ask at the same time */
+  const listingJobs = new Map<string, Promise<{ files: Set<string>; dirs: Set<string> }>>();
+  const listing = (dir: string): Promise<{ files: Set<string>; dirs: Set<string> }> => {
+    let job = listingJobs.get(dir);
+    if (job === undefined) {
+      job = gate
+        .run(() => fs.list(dir))
+        .then(({ files, dirs }) => {
+          const listed = { files: new Set(files.map((name) => named(dir, name))), dirs: new Set(dirs.map((name) => named(dir, name))) };
+          listings.set(dir, listed);
+          return listed;
+        });
+      listingJobs.set(dir, job);
     }
-    return listed;
+    return job;
   };
   /** Notes that the sync made a file, and with it the folders above it. */
   const noteWritten = (path: string): void => {
@@ -476,15 +534,111 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     return target === null ? null : encode(target);
   };
 
+  /** The `.gitignore` files that have a say in a folder, the one of the vault first */
+  type Level = { dir: string; decide: Verdict };
+  const ignored = (levels: Level[], path: string, isDir: boolean): boolean => {
+    // As in git, the file of the innermost folder that says something decides
+    for (let i = levels.length - 1; i >= 0; i--) {
+      const { dir, decide } = levels[i];
+      const said = decide(dir === "" ? path : path.slice(dir.length + 1), isDir);
+      if (said !== undefined) {
+        return said;
+      }
+    }
+    return false;
+  };
+  /**
+   * Finds the files of the vault that the sync is about, and the size and
+   * time of each. The folders are asked a few at once. Of the remote this
+   * needs nothing but the rules that come from it, so it can start before
+   * the remote has answered.
+   * @param rules the text of each `.gitignore` that counts in place of the one of the vault, by its path
+   * @param base what was agreed on, and `known` what was noted of the files then
+   */
+  const look = async (rules: Map<string, string>, base: Map<string, Entry>, known: State): Promise<Looked> => {
+    const gitignore = rules.get(".gitignore") ?? decode((await gate.run(() => fs.read(".gitignore"))) ?? new Uint8Array(0));
+    // A folder that is ignored is not gone into, so nothing inside it is brought back
+    const walk = async (dir: string, above: Level[]): Promise<string[]> => {
+      const listed = await listing(dir);
+      let levels = above;
+      if (dir !== "") {
+        const at = join(dir, ".gitignore");
+        let own = rules.get(at);
+        if (own === undefined && listed.files.has(".gitignore")) {
+          const data = await gate.run(() => fs.read(at));
+          own = data === null ? undefined : decode(data);
+        }
+        if (own !== undefined) {
+          levels = [...above, { dir, decide: verdict(own) }];
+        }
+      }
+      const files: string[] = [];
+      for (const name of listed.files) {
+        const path = join(dir, name);
+        if (!excluded(path, false) && (base.has(path) || !ignored(levels, path, false))) {
+          files.push(path);
+        }
+      }
+      const inside: Promise<string[]>[] = [];
+      for (const name of listed.dirs) {
+        const path = join(dir, name);
+        if (!excluded(path, true) && !ignored(levels, path, true)) {
+          inside.push(walk(path, levels));
+        }
+      }
+      // In the order of the folders, whichever of them answered first
+      return files.concat(...(await Promise.all(inside)));
+    };
+    const found = await walk("", [{ dir: "", decide: verdict(gitignore) }]);
+    const seen = new Set(found);
+    // A file that is tracked stays tracked when its folder is ignored later.
+    // One that got another spelling here is a file with another name now.
+    const unseen = [...base.keys()].filter((path) => !seen.has(path) && !excluded(path, false));
+    const still = await Promise.all(unseen.map((path) => gate.run(() => fs.stat(path))));
+    /** What the disk said a moment ago, so that it is not asked again */
+    const asked = new Map<string, FileStat>();
+    for (let i = 0; i < unseen.length; i++) {
+      const stat = still[i];
+      if (stat !== null && !(await spelledOtherwise(unseen[i]))) {
+        found.push(unseen[i]);
+        seen.add(unseen[i]);
+        asked.set(unseen[i], stat);
+      }
+    }
+    const sizes = await Promise.all(
+      found.map(async (path) => {
+        const before = known.stat[path];
+        // Where the app has the size and time of its files in mind, a file that is as it was costs no look at the disk
+        if (fs.quickStat !== undefined && before !== undefined && base.has(path) && known.racy?.[path] !== true) {
+          const inMind = await fs.quickStat(path);
+          if (inMind !== null && inMind.size === before.size && inMind.mtime === before.mtime) {
+            return before;
+          }
+        }
+        return asked.get(path) ?? gate.run(() => fs.stat(path));
+      }),
+    );
+    const scanned = new Map<string, FileStat>();
+    found.forEach((path, i) => {
+      const stat = sizes[i];
+      if (stat !== null) {
+        scanned.set(path, stat);
+      }
+    });
+    return { gitignore, found, seen, scanned };
+  };
+
   // --- What was agreed on last time -----------------------------------------
   let state: State = { version: 1, url: remote.url, branch: "", commit: null, tree: {}, stat: {}, absent: {} };
   const saved = await fs.read(statePath);
   /** True if there was a sync before, and what it agreed on is lost */
   let lost = false;
-  if (saved !== null) {
+  /** The file of last time as it is, to see afterwards whether there is anything new to write into it */
+  const savedText = saved === null ? null : decode(saved);
+  if (savedText !== null) {
     let parsed: State | null = null;
     try {
-      parsed = JSON.parse(decode(saved)) as State;
+      parsed = JSON.parse(savedText) as State;
     } catch {
       // Cut off, as after an app that was stopped while it wrote. The vault joins the remote anew:
       // nothing is removed on either side. A file that differs may hold what this device changed
@@ -505,6 +659,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   // --- What the remote holds now --------------------------------------------
   const progress = options.onProgress ?? (() => undefined);
   progress({ step: "looking", done: 0, total: 0 });
+  // The look at the vault starts now and goes on while the remote answers: the two do not wait for
+  // each other. Not where names are read as the remote spells them, which is not known yet.
+  const stateAtFirst = state;
+  const early = options.composeNames === true ? null : look(new Map(), new Map(Object.entries(state.tree)), state);
+  // If the sync stops before it asks for what this found, a failure of it is nobody's to hear
+  early?.catch(() => undefined);
   const refs = await lsRefs(http, remote);
   const opensWith = refs.head?.slice("refs/heads/".length);
   // Without a branch that is asked for: the one of last time while the remote has it, and
@@ -657,59 +817,16 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   /** True if the paths of files that are too large were added to the `.gitignore` of the remote, and not to one of the vault */
   let addedToTheirs = false;
   {
-    let gitignore = rulesToCome.get(".gitignore") ?? decode((await fs.read(".gitignore")) ?? new Uint8Array(0));
-    const found: string[] = [];
-    /** The `.gitignore` files that have a say in a folder, the one of the vault first */
-    type Level = { dir: string; decide: Verdict };
-    const ignored = (levels: Level[], path: string, isDir: boolean): boolean => {
-      // As in git, the file of the innermost folder that says something decides
-      for (let i = levels.length - 1; i >= 0; i--) {
-        const { dir, decide } = levels[i];
-        const said = decide(dir === "" ? path : path.slice(dir.length + 1), isDir);
-        if (said !== undefined) {
-          return said;
-        }
-      }
-      return false;
-    };
-    // A folder that is ignored is not gone into, so nothing inside it is brought back
-    const walk = async (dir: string, above: Level[]): Promise<void> => {
-      const listed = await listing(dir);
-      let levels = above;
-      if (dir !== "") {
-        const at = join(dir, ".gitignore");
-        let rules = rulesToCome.get(at);
-        if (rules === undefined && listed.files.has(".gitignore")) {
-          const own = await fs.read(at);
-          rules = own === null ? undefined : decode(own);
-        }
-        if (rules !== undefined) {
-          levels = [...above, { dir, decide: verdict(rules) }];
-        }
-      }
-      for (const name of listed.files) {
-        const path = join(dir, name);
-        if (!excluded(path, false) && (base.has(path) || !ignored(levels, path, false))) {
-          found.push(path);
-        }
-      }
-      for (const name of listed.dirs) {
-        const path = join(dir, name);
-        if (!excluded(path, true) && !ignored(levels, path, true)) {
-          await walk(path, levels);
-        }
-      }
-    };
-    await walk("", [{ dir: "", decide: verdict(gitignore) }]);
-    const seen = new Set(found);
-    // A file that is tracked stays tracked when its folder is ignored later.
-    // One that got another spelling here is a file with another name now.
-    for (const path of base.keys()) {
-      if (!seen.has(path) && !excluded(path, false) && (await fs.stat(path)) !== null && !(await spelledOtherwise(path))) {
-        found.push(path);
-        seen.add(path);
-      }
+    // What was found while the remote answered holds, unless the remote has a say in what is found
+    let looked: Looked;
+    if (early !== null && rulesToCome.size === 0 && state === stateAtFirst) {
+      looked = await early;
+    } else {
+      await early?.catch(() => undefined);
+      looked = await look(rulesToCome, base, state);
     }
+    let { gitignore } = looked;
+    const { found, seen, scanned } = looked;
 
     const tooLarge: string[] = [];
     /** Tracked files that the vault does not hold any more, by the size that they had */
@@ -720,24 +837,9 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         gone.set(before.size, [...(gone.get(before.size) ?? []), path]);
       }
     }
-    /** The size and time of each file as the scan found them, so that the device is asked once */
-    const scanned = new Map<string, FileStat>();
     for (const path of found) {
-      // Where the app has the size and time of its files in mind, a file that is as it was costs no look at the disk
-      const before = state.stat[path];
-      let stat: FileStat | null = null;
-      if (fs.quickStat !== undefined && before !== undefined && base.has(path) && state.racy?.[path] !== true) {
-        const inMind = await fs.quickStat(path);
-        if (inMind !== null && inMind.size === before.size && inMind.mtime === before.mtime) {
-          stat = before;
-        }
-      }
-      stat ??= await fs.stat(path);
-      if (stat === null) {
-        continue;
-      }
-      scanned.set(path, stat);
-      if (stat.size > options.maxFileBytes && !base.has(path)) {
+      const stat = scanned.get(path);
+      if (stat !== undefined && stat.size > options.maxFileBytes && !base.has(path)) {
         const was = gone.get(stat.size)?.shift();
         if (was !== undefined) {
           moved.set(path, base.get(was)!);
@@ -755,18 +857,74 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       if (!seen.has(".gitignore")) {
         found.push(".gitignore");
       }
+      // What the scan found of it holds no more
+      const written = await fs.stat(".gitignore");
+      if (written === null) {
+        scanned.delete(".gitignore");
+      } else {
+        scanned.set(".gitignore", written);
+      }
       log(`${tooLarge.length} file(s) are too large to send and were written into .gitignore`);
     }
     const skip = new Set(tooLarge);
 
-    // Written a moment ago, if a file was too large: what the scan found of it holds no more
-    scanned.delete(".gitignore");
+    /** True if a file has the size and time that it had when it was agreed on, so that it need not be read */
+    const asItWas = (path: string, stat: FileStat): boolean => {
+      const before = state.stat[path];
+      return (
+        base.has(path) &&
+        before !== undefined &&
+        before.size === stat.size &&
+        before.mtime === stat.mtime &&
+        // A file that is too large to read cannot be looked at again, so its size and time have to do
+        (state.racy?.[path] !== true || stat.size > options.maxFileBytes)
+      );
+    };
+    // The files that have to be read to know what they hold: new ones, and ones that are not as they were.
+    // Small ones are read a few at once. A large one is read alone.
+    /** What each of them holds, or null for one that is gone by now */
+    const held = new Map<string, Entry | null>();
+    const read = async (path: string): Promise<void> => {
+      const agreed = base.get(path);
+      const target = await linkAt(path);
+      const data = target ?? (await fs.read(path));
+      if (data === null) {
+        held.set(path, null);
+        return;
+      }
+      const oid = await objectId({ type: "blob", data });
+      let mode = MODE_FILE;
+      if (target !== null) {
+        mode = MODE_LINK;
+      } else if (agreed !== undefined && (isFile(agreed) || (agreed.mode === MODE_LINK && fs.readLink === undefined))) {
+        // Whether a file may be run is not known here, so it stays as the repository has it.
+        // So does a link where links cannot be made: it is a file there that holds where it points.
+        mode = agreed.mode;
+      }
+      held.set(path, { oid, mode });
+    };
+    {
+      const small: string[] = [];
+      const large: string[] = [];
+      for (const path of found) {
+        const stat = scanned.get(path);
+        if (stat === undefined || skip.has(path) || moved.has(path) || stat.size > options.maxFileBytes || asItWas(path, stat)) {
+          continue;
+        }
+        (stat.size <= SMALL_BYTES ? small : large).push(path);
+      }
+      await Promise.all(small.map((path) => gate.run(() => read(path))));
+      for (const path of large) {
+        await read(path);
+      }
+    }
+
     for (const path of found) {
       if (skip.has(path)) {
         continue;
       }
-      const stat = scanned.get(path) ?? (await fs.stat(path));
-      if (stat === null) {
+      const stat = scanned.get(path);
+      if (stat === undefined) {
         continue;
       }
       present.add(path);
@@ -778,15 +936,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         continue;
       }
       const agreed = base.get(path);
-      const before = state.stat[path];
-      const unchanged =
-        agreed !== undefined &&
-        before !== undefined &&
-        before.size === stat.size &&
-        before.mtime === stat.mtime &&
-        // A file that is too large to read cannot be looked at again, so its size and time have to do
-        (state.racy?.[path] !== true || stat.size > options.maxFileBytes);
-      if (unchanged) {
+      if (agreed !== undefined && asItWas(path, stat)) {
         here.set(path, agreed);
       } else if (stat.size > options.maxFileBytes) {
         // Tracked, changed, and too large to read and send: the remote keeps its version
@@ -795,21 +945,11 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         result.tooLargeChanged.push(path);
         continue;
       } else {
-        const target = await linkAt(path);
-        const data = target ?? (await fs.read(path));
-        if (data === null) {
+        const entry = held.get(path) ?? null;
+        if (entry === null) {
           continue;
         }
-        const oid = await objectId({ type: "blob", data });
-        let mode = MODE_FILE;
-        if (target !== null) {
-          mode = MODE_LINK;
-        } else if (agreed !== undefined && (isFile(agreed) || (agreed.mode === MODE_LINK && fs.readLink === undefined))) {
-          // Whether a file may be run is not known here, so it stays as the repository has it.
-          // So does a link where links cannot be made: it is a file there that holds where it points.
-          mode = agreed.mode;
-        }
-        here.set(path, { oid, mode });
+        here.set(path, entry);
       }
       stats.set(path, stat);
       seenAs.set(path, here.get(path)!.oid);
@@ -1145,7 +1285,11 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     if (first && !ended) {
       next.joining = true;
     }
-    await fs.write(statePath, encode(JSON.stringify(next)));
+    // A sync that found nothing to do leaves what was agreed on as it is, and the file with it
+    const text = JSON.stringify(next);
+    if (savedText !== text) {
+      await fs.write(statePath, encode(text));
+    }
   };
 
   try {

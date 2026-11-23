@@ -984,6 +984,105 @@ describe("sync", () => {
       assert.equal(reads, 1);
     });
 
+    it("writes nothing into the vault when there was nothing to do", async () => {
+      const w = setup({ "a.md": "a\n", "dir/b.md": "b\n" });
+      await w.syncPhone();
+      utimesSync(path.join(w.phoneDir, "a.md"), 1_700_000_000, 1_700_000_000);
+      utimesSync(path.join(w.phoneDir, "dir/b.md"), 1_700_000_000, 1_700_000_000);
+      // The first sync after files were written looks at them once more, and notes that they are as they were
+      await w.syncPhone();
+      const fs = new NodeFs(w.phoneDir);
+      const write = fs.write.bind(fs);
+      const written: string[] = [];
+      fs.write = (file, data) => {
+        written.push(file);
+        return write(file, data);
+      };
+      const result = await w.syncPhone({ fs });
+      assert.deepEqual([result.downloaded, result.uploaded, written], [[], [], []]);
+      // What changes is written as before
+      w.writePhone("a.md", "a, changed\n");
+      await w.syncPhone({ fs });
+      // The commit and its folder are kept, and what was agreed on is noted
+      assert.deepEqual(written.filter((file) => !file.startsWith(".piecemeal/objects/")), [".piecemeal/state.json"]);
+    });
+
+    it("asks the vault a few things at once, never many, and while the remote answers", async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 60; i++) {
+        files[`dir ${i % 12}/sub ${i % 3}/note ${i}.md`] = `note ${i}\n`;
+      }
+      const w = setup(files);
+      await w.syncPhone();
+      for (let i = 0; i < 30; i++) {
+        w.writePhone(`dir ${i % 12}/new ${i}.md`, `new ${i}\n`);
+      }
+      const fs = new NodeFs(w.phoneDir);
+      let atOnce = 0;
+      let most = 0;
+      let answered = false;
+      let askedBeforeTheAnswer = 0;
+      /** An answer that takes a moment, as on a phone */
+      const slow = <A extends unknown[], R>(ask: (...args: A) => Promise<R>): ((...args: A) => Promise<R>) => {
+        return async (...args) => {
+          most = Math.max(most, ++atOnce);
+          askedBeforeTheAnswer += answered ? 0 : 1;
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          try {
+            return await ask(...args);
+          } finally {
+            atOnce--;
+          }
+        };
+      };
+      fs.stat = slow(fs.stat.bind(fs));
+      fs.list = slow(fs.list.bind(fs));
+      fs.read = slow(fs.read.bind(fs));
+      const result = await w.syncPhone({
+        fs,
+        http: async (request) => {
+          const response = await nodeHttp(request);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          answered = true;
+          return response;
+        },
+      });
+      assert.equal(result.uploaded.length, 30);
+      assert.ok(most > 1 && most <= 8, `${most} at once`);
+      // The folders were listed and the files looked at before the remote had said where its branch is
+      assert.ok(askedBeforeTheAnswer > 60, `${askedBeforeTheAnswer} asked before the answer`);
+      w.pullPc();
+      assert.equal(w.readPc("dir 3/new 3.md"), "new 3\n");
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    });
+
+    it("asks once for the size and time of a file that it wrote and looked at", async () => {
+      const w = setup();
+      const inner = new NodeFs(w.phoneDir);
+      const stat = inner.stat.bind(inner);
+      let asked = 0;
+      inner.stat = (file) => {
+        asked++;
+        return stat(file);
+      };
+      const fs = new VerifiedFs(inner);
+      await fs.write("a.md", new Uint8Array([1, 2, 3]));
+      assert.equal(asked, 1);
+      assert.equal((await fs.stat("a.md"))?.size, 3);
+      assert.equal(asked, 1);
+      // Told once: later the file may be another one
+      writeFileSync(path.join(w.phoneDir, "a.md"), "longer than before");
+      assert.equal((await fs.stat("a.md"))?.size, 18);
+      assert.equal(asked, 2);
+      // Not what was written before another file was, and not after the file is gone
+      await fs.write("a.md", new Uint8Array([1]));
+      await fs.write("b.md", new Uint8Array([1, 2]));
+      assert.equal((await fs.stat("a.md"))?.size, 1);
+      await fs.write("b.md", new Uint8Array([1, 2]));
+      await fs.remove("b.md");
+      assert.equal(await fs.stat("b.md"), null);
+    });
+
     it("knows a remote that did not move by one file, and reads its folders again when that file is no good", async () => {
       const files: Record<string, string> = {};
       for (let i = 0; i < 12; i++) {
