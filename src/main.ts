@@ -83,6 +83,8 @@ export default class PiecemealGitPlugin extends Plugin {
       );
       this.refresh();
       void this.placePanel();
+      // A tab that Obsidian kept for the panel may show after this. Then there is one too many.
+      this.registerEvent(this.app.workspace.on("layout-change", () => this.onePanel()));
       if (this.config.onStart) {
         void this.sync(true);
       }
@@ -189,20 +191,48 @@ export default class PiecemealGitPlugin extends Plugin {
    * there, also where the ribbon is hidden or folded into a menu.
    */
   private async placePanel(): Promise<void> {
+    this.onePanel();
     if (this.panelPlaced) {
       return;
     }
-    if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length === 0) {
+    if (this.panels().length === 0) {
       await this.app.workspace.getRightLeaf(false)?.setViewState({ type: VIEW_TYPE, active: false });
     }
     this.panelPlaced = true;
     this.saveState();
   }
 
+  /**
+   * The tabs of the sidebars that are the panel, by what each of them is to
+   * show. That finds one that Obsidian has not made yet too, and one that it
+   * kept while the plugin was taken out and put in again, as for an update.
+   */
+  private panels(): WorkspaceLeaf[] {
+    const found: WorkspaceLeaf[] = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.getViewState().type === VIEW_TYPE) {
+        found.push(leaf);
+      }
+    });
+    return found;
+  }
+
+  /**
+   * Closes every panel but one. A second one came to be where the plugin was
+   * updated while Obsidian ran and no longer knew that the panel had its
+   * place: the tab that Obsidian kept for it showed only after the plugin had
+   * put in another. Two panels say the same, so one of them goes.
+   */
+  private onePanel(): void {
+    for (const extra of this.panels().slice(1)) {
+      extra.detach();
+    }
+  }
+
   /** Shows the panel, and puts it into the right sidebar first if it is in neither. */
   async openPanel(): Promise<void> {
     const { workspace } = this.app;
-    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null;
+    let leaf: WorkspaceLeaf | null = this.panels()[0] ?? null;
     if (leaf === null) {
       leaf = workspace.getRightLeaf(false);
       await leaf?.setViewState({ type: VIEW_TYPE, active: true });
