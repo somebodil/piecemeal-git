@@ -48,6 +48,8 @@ export default class PiecemealGitPlugin extends Plugin {
   /** What changed in the vault since the last sync, as of the last look. Null if it was not looked at, or never synced. */
   changes: LocalChange[] | null = null;
   private looking = false;
+  /** The notice that says that files could not be reverted, while it is on the screen */
+  private revertFailed: Notice | null = null;
   /** What files held at the last sync, by the ids of what they held: the last few that were asked for */
   private readonly befores = new Map<string, Uint8Array>();
 
@@ -609,6 +611,9 @@ export default class PiecemealGitPlugin extends Plugin {
     ) {
       return false;
     }
+    // What was said of a try that failed holds no more once another one is made
+    this.revertFailed?.hide();
+    this.revertFailed = null;
     try {
       const { reverted, left } = await revert(this.common().options, changes);
       const said = [`Reverted ${reverted.length === 1 ? reverted[0] : `${reverted.length} files`}.`];
@@ -618,7 +623,7 @@ export default class PiecemealGitPlugin extends Plugin {
       new Notice(said.join(" "));
     } catch (error) {
       console.error("piecemeal-git: the files could not be reverted", error);
-      new Notice(`The files could not be reverted. ${explain(error)}`, 0);
+      this.revertFailed = new Notice(`The files could not be reverted. ${explain(error)}`, 0);
       return false;
     } finally {
       this.changedSince();

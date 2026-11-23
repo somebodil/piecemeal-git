@@ -311,3 +311,21 @@
   flex: none;
   margin: 0;
 }
+
+/* A finger needs more room than a pointer: the rows of the list, their boxes, and the buttons of a change. */
+.is-mobile .piecemeal-git-changes > li {
+  align-items: center;
+  padding: var(--size-4-2) 0;
+}
+
+.is-mobile .piecemeal-git-changes > li > input[type="checkbox"],
+.is-mobile .piecemeal-git-revert input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+}
+
+.is-mobile .piecemeal-git-diff-pick button {
+  min-height: 34px;
+  padding: var(--size-2-2) var(--size-4-3);
+  font-size: var(--font-ui-small);
+}

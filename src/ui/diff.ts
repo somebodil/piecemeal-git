@@ -168,7 +168,7 @@ export class DiffModal extends Modal {
     let tally: HTMLElement | null = null;
     const tell = (): void => {
       tally?.setText(
-        `Of ${diffed.changes.length} ${diffed.changes.length === 1 ? "change" : "changes"}: ${taken[0]} as ${choose?.before ?? ""}, ${taken[1]} as ${choose?.after ?? ""}, ${taken[2]} with both.`,
+        `${diffed.changes.length} ${diffed.changes.length === 1 ? "change" : "changes"}. ${choose?.before ?? ""}: ${taken[0]}. ${choose?.after ?? ""}: ${taken[1]}. Both: ${taken[2]}.`,
       );
     };
     const pick = (change: number, choice: number, box: HTMLElement): void => {
