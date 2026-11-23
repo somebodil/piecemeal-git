@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { decode, encode } from "./bytes.ts";
-import { diffCounts, type DiffRow, diffRows, diffText, isText, merge3, sameRows } from "./merge.ts";
+import { chosenText, diffCounts, type DiffRow, diffRows, diffText, isText, merge3, sameRows } from "./merge.ts";
 
 function merged(base: string, ours: string, theirs: string): string | null {
   const out = merge3(encode(base), encode(ours), encode(theirs));
@@ -137,7 +137,12 @@ describe("diffText", () => {
     assert.deepEqual(sides(rows, diffed.before), { old: before, now: after });
     // A fold tells where its lines are in both texts
     assert.deepEqual(rows[9], { kind: "fold", oldStart: 13, newStart: 13, count: 8 });
-    assert.deepEqual([...sameRows(diffed.before, 13, 13, 1)], [{ kind: "same", text: "line 14\n", oldLine: 14, newLine: 14 }]);
+    assert.deepEqual([...sameRows(diffed.before, 13, 13, 1)], [{ kind: "same", text: "line 14\n", oldLine: 14, newLine: 14, change: null }]);
+    // A line that was taken away or added tells which change it belongs to
+    assert.deepEqual(
+      rows.filter((row) => row.kind === "removed" || row.kind === "added").map((row) => (row.kind === "fold" ? null : row.change)),
+      [0, 0, 1, 2],
+    );
   });
 
   it("shows a new file and one that is gone as all added and all taken away", () => {
@@ -165,8 +170,8 @@ describe("diffText", () => {
     // The rows come as they are asked for: the first few cost nothing of the rest
     const rows = diffRows(diffed);
     assert.deepEqual([rows.next().value, rows.next().value], [
-      { kind: "same", text: "top\n", oldLine: 1, newLine: 1 },
-      { kind: "removed", text: "old 0\n", oldLine: 2, newLine: null },
+      { kind: "same", text: "top\n", oldLine: 1, newLine: 1, change: null },
+      { kind: "removed", text: "old 0\n", oldLine: 2, newLine: null, change: 0 },
     ]);
   });
 
@@ -195,6 +200,60 @@ describe("diffText", () => {
       }
       const counts = diffCounts(diffed);
       assert.equal(diffed.before.length - counts.removed + counts.added, diffed.after.length);
+      // Every change as the one side has it is that side
+      assert.equal(chosenText(diffed, diffed.changes.map(() => 0)), before);
+      assert.equal(chosenText(diffed, diffed.changes.map(() => 1)), after);
     }
+  });
+
+  it("compares two long texts with many changes piece by piece, between the lines that both have once", () => {
+    const line = (i: number): string => `line ${i} of a long text\n`;
+    const before: string[] = [];
+    const after: string[] = [];
+    for (let i = 0; i < 60_000; i++) {
+      before.push(line(i));
+      // Every twentieth line is another one, and now and then a line is added or left out
+      if (i % 20 === 7) {
+        after.push(`changed ${line(i)}`);
+      } else if (i % 997 !== 3) {
+        after.push(line(i));
+      }
+      if (i % 1009 === 5) {
+        after.push(`added after ${i}\n`);
+      }
+    }
+    const started = performance.now();
+    const diffed = diffText(encode(before.join("")), encode(after.join("")))!;
+    const took = performance.now() - started;
+    // Far more changes than two texts are compared through in one piece, and none of them told coarsely
+    assert.equal(diffed.coarse, false);
+    assert.ok(diffed.changes.length > 3000, `${diffed.changes.length} changes`);
+    assert.deepEqual(diffCounts(diffed), { added: 3000 + 60, removed: 3000 + 61 - 3 });
+    assert.equal(chosenText(diffed, new Uint8Array(diffed.changes.length).fill(1)), after.join(""));
+    assert.equal(chosenText(diffed, new Uint8Array(diffed.changes.length)), before.join(""));
+    assert.ok(took < 3000, `it took ${took.toFixed(0)} ms`);
+  });
+});
+
+describe("chosenText", () => {
+  const before = "one\ntwo\nthree\nfour\nfive\n";
+  const after = "one\nTWO\nthree\nfour\nFIVE\nsix\n";
+  const diffed = diffText(encode(before), encode(after))!;
+
+  it("keeps for each change the lines of the side that was chosen, or of both", () => {
+    assert.equal(diffed.changes.length, 2);
+    assert.equal(chosenText(diffed, [0, 0]), before);
+    assert.equal(chosenText(diffed, [1, 1]), after);
+    assert.equal(chosenText(diffed, [1, 0]), "one\nTWO\nthree\nfour\nfive\n");
+    assert.equal(chosenText(diffed, [0, 1]), "one\ntwo\nthree\nfour\nFIVE\nsix\n");
+    assert.equal(chosenText(diffed, [2, 2]), "one\ntwo\nTWO\nthree\nfour\nfive\nFIVE\nsix\n");
+  });
+
+  it("gives a last line without an end one, when another line comes after it", () => {
+    const ends = diffText(encode("one\ntwo"), encode("one\nTWO\r\nthree"))!;
+    assert.equal(chosenText(ends, [0]), "one\ntwo");
+    assert.equal(chosenText(ends, [1]), "one\nTWO\r\nthree");
+    // The line of the one side is no longer the last one: it ends as the line after it does
+    assert.equal(chosenText(ends, [2]), "one\ntwo\r\nTWO\r\nthree");
   });
 });

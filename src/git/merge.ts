@@ -74,7 +74,7 @@ function lines(data: Uint8Array): string[] | null {
  * What changed from one list of lines to another, by the shortest way to
  * turn the first into the second (Myers). Null if they are too far apart.
  */
-function diff(a: number[], b: number[]): Change[] | null {
+function diff(a: ArrayLike<number>, b: ArrayLike<number>, maxDistance = MAX_DISTANCE): Change[] | null {
   let head = 0;
   while (head < a.length && head < b.length && a[head] === b[head]) {
     head++;
@@ -92,10 +92,16 @@ function diff(a: number[], b: number[]): Change[] | null {
     return [{ oldStart: head, oldEnd: head + n, newStart: head, newEnd: head + m }];
   }
 
-  // How far each diagonal gets with d changes, for every d up to the one that reaches the end
-  const max = Math.min(n + m, MAX_DISTANCE);
+  // They differ in as many lines at least as the one is longer than the other
+  if (Math.abs(n - m) > maxDistance) {
+    return null;
+  }
+  // How far each diagonal gets with d changes, for every d up to the one that reaches the end.
+  // With d changes only the diagonals from -d to d are reached, and only those are kept of each
+  // step: twice the cap of them would be kept otherwise, which is most of what a comparison holds.
+  const max = Math.min(n + m, maxDistance);
   const reached: Int32Array[] = [];
-  let furthest = new Int32Array(2 * max + 2);
+  const furthest = new Int32Array(2 * max + 2);
   let found = -1;
   for (let d = 0; d <= max && found < 0; d++) {
     for (let k = -d; k <= d; k += 2) {
@@ -111,8 +117,7 @@ function diff(a: number[], b: number[]): Change[] | null {
         break;
       }
     }
-    reached.push(furthest);
-    furthest = furthest.slice();
+    reached.push(furthest.slice(max - d, max + d + 1));
   }
   if (found < 0) {
     return null;
@@ -123,11 +128,13 @@ function diff(a: number[], b: number[]): Change[] | null {
   let x = n;
   let y = m;
   for (let d = found; d > 0; d--) {
+    // Of the step before, the diagonal k is at k + d - 1
     const before = reached[d - 1];
+    const at = d - 1;
     const k = x - y;
-    const down = k === -d || (k !== d && before[max + k - 1] < before[max + k + 1]);
+    const down = k === -d || (k !== d && before[at + k - 1] < before[at + k + 1]);
     const fromK = down ? k + 1 : k - 1;
-    const fromX = before[max + fromK];
+    const fromX = before[at + fromK];
     const fromY = fromX - fromK;
     // A change, and after it the lines that are the same on both sides
     const atX = down ? fromX : fromX + 1;
@@ -231,11 +238,126 @@ export interface TextDiff {
   /** The runs of lines that changed, from the top of the texts down */
   changes: Change[];
   /**
-   * True if the two are too far apart to be compared line by line. Then
-   * `changes` is one change: all that lies between what they start with and
-   * what they end with alike.
+   * True if a part of the two is too far apart to be compared line by line.
+   * That part is one change: all that lies between what the two start with
+   * and what they end with alike there.
    */
   coarse: boolean;
+}
+
+/** Two runs of lines that differ in more lines than this are not compared to the end by themselves */
+const DIFF_DISTANCE = 1000;
+
+/**
+ * The lines that both texts have exactly once, and in the same order: the
+ * longest row of them. Whatever else changed, these are the same line on
+ * both sides, so the texts can be compared piece by piece between them, as
+ * `git diff --patience` does.
+ *
+ * @param kinds how many different lines there are, each one a number below it
+ * @returns where each such line is in the one text and in the other, from the top down
+ */
+function anchors(a: Int32Array, b: Int32Array, kinds: number): [number, number][] {
+  const inA = new Int32Array(kinds);
+  const inB = new Int32Array(kinds);
+  const whereB = new Int32Array(kinds);
+  for (let i = 0; i < a.length; i++) {
+    inA[a[i]]++;
+  }
+  for (let j = 0; j < b.length; j++) {
+    inB[b[j]]++;
+    whereB[b[j]] = j;
+  }
+  // The lines that both have once, in the order of the one text, by where they are in the other
+  const fromA: number[] = [];
+  const fromB: number[] = [];
+  for (let i = 0; i < a.length; i++) {
+    if (inA[a[i]] === 1 && inB[a[i]] === 1) {
+      fromA.push(i);
+      fromB.push(whereB[a[i]]);
+    }
+  }
+  // The longest row of them that goes down in the other text too. `ends[n]` is the pair that a
+  // row of n + 1 pairs ends with where it ends as high up as it can, and `before` the pair before each.
+  const ends: number[] = [];
+  const before = new Int32Array(fromB.length);
+  for (let p = 0; p < fromB.length; p++) {
+    let low = 0;
+    let high = ends.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (fromB[ends[middle]] < fromB[p]) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    before[p] = low === 0 ? -1 : ends[low - 1];
+    ends[low] = p;
+  }
+  const row: [number, number][] = [];
+  for (let p = ends.length === 0 ? -1 : ends[ends.length - 1]; p >= 0; p = before[p]) {
+    row.push([fromA[p], fromB[p]]);
+  }
+  return row.reverse();
+}
+
+/**
+ * What changed from one list of lines to another. Two that are far apart
+ * are compared piece by piece, between the lines that both have once. A
+ * piece that is too far apart by itself is told as one change, and
+ * `coarse` says that there is such a piece.
+ */
+function compare(a: Int32Array, b: Int32Array, kinds: number): { changes: Change[]; coarse: boolean } {
+  const direct = diff(a, b, DIFF_DISTANCE);
+  if (direct !== null) {
+    return { changes: direct, coarse: false };
+  }
+  const changes: Change[] = [];
+  let coarse = false;
+  let oldAt = 0;
+  let newAt = 0;
+  const piece = (oldEnd: number, newEnd: number): void => {
+    if (oldEnd === oldAt && newEnd === newAt) {
+      return;
+    }
+    const part = diff(a.subarray(oldAt, oldEnd), b.subarray(newAt, newEnd), DIFF_DISTANCE);
+    if (part === null) {
+      // Too far apart also by itself: all that lies between what the two start and end with alike
+      let head = 0;
+      while (oldAt + head < oldEnd && newAt + head < newEnd && a[oldAt + head] === b[newAt + head]) {
+        head++;
+      }
+      let tail = 0;
+      while (oldEnd - tail > oldAt + head && newEnd - tail > newAt + head && a[oldEnd - 1 - tail] === b[newEnd - 1 - tail]) {
+        tail++;
+      }
+      changes.push({ oldStart: oldAt + head, oldEnd: oldEnd - tail, newStart: newAt + head, newEnd: newEnd - tail });
+      coarse = true;
+      return;
+    }
+    for (const change of part) {
+      changes.push({ oldStart: change.oldStart + oldAt, oldEnd: change.oldEnd + oldAt, newStart: change.newStart + newAt, newEnd: change.newEnd + newAt });
+    }
+  };
+  for (const [inOld, inNew] of anchors(a, b, kinds)) {
+    piece(inOld, inNew);
+    oldAt = inOld + 1;
+    newAt = inNew + 1;
+  }
+  piece(a.length, b.length);
+  // Two changes that touch are one
+  const joined: Change[] = [];
+  for (const change of changes) {
+    const last = joined[joined.length - 1];
+    if (last !== undefined && last.oldEnd === change.oldStart && last.newEnd === change.newStart) {
+      last.oldEnd = change.oldEnd;
+      last.newEnd = change.newEnd;
+    } else {
+      joined.push(change);
+    }
+  }
+  return { changes: joined, coarse };
 }
 
 /**
@@ -250,35 +372,66 @@ export function diffText(before: Uint8Array, after: Uint8Array): TextDiff | null
   }
   // A number for each line that is there, so that two lines are compared in one step
   const numbers = new Map<string, number>();
-  const numbered = (list: string[]): number[] =>
-    list.map((line) => {
-      let number = numbers.get(line);
+  const numbered = (list: string[]): Int32Array => {
+    const out = new Int32Array(list.length);
+    for (let i = 0; i < list.length; i++) {
+      let number = numbers.get(list[i]);
       if (number === undefined) {
         number = numbers.size;
-        numbers.set(line, number);
+        numbers.set(list[i], number);
       }
-      return number;
-    });
+      out[i] = number;
+    }
+    return out;
+  };
   const x = numbered(a);
   const y = numbered(b);
-  const changes = diff(x, y);
-  if (changes !== null) {
-    return { before: a, after: b, changes, coarse: false };
+  return { before: a, after: b, ...compare(x, y, numbers.size) };
+}
+
+/**
+ * The text that comes of a comparison when, for each change, the lines of
+ * the one side are kept, or those of the other, or both.
+ *
+ * @param choices for each change of the comparison: 0 for the lines of the
+ *   text before, 1 for those of the text after, 2 for both, the ones before first
+ */
+export function chosenText(diffed: TextDiff, choices: ArrayLike<number>): string {
+  const { before, after, changes } = diffed;
+  const out: string[] = [];
+  let at = 0;
+  changes.forEach((change, i) => {
+    for (let line = at; line < change.oldStart; line++) {
+      out.push(before[line]);
+    }
+    if (choices[i] !== 1) {
+      for (let line = change.oldStart; line < change.oldEnd; line++) {
+        out.push(before[line]);
+      }
+    }
+    if (choices[i] === 1 || choices[i] === 2) {
+      for (let line = change.newStart; line < change.newEnd; line++) {
+        out.push(after[line]);
+      }
+    }
+    at = change.oldEnd;
+  });
+  for (let line = at; line < before.length; line++) {
+    out.push(before[line]);
   }
-  let head = 0;
-  while (head < x.length && head < y.length && x[head] === y[head]) {
-    head++;
+  // The last line of a text may have no end. Put before another line, it gets one, as that line has it.
+  for (let i = 0; i < out.length - 1; i++) {
+    if (!out[i].endsWith("\n")) {
+      out[i] += out[i + 1].endsWith("\r\n") ? "\r\n" : "\n";
+    }
   }
-  let tail = 0;
-  while (tail < x.length - head && tail < y.length - head && x[x.length - 1 - tail] === y[y.length - 1 - tail]) {
-    tail++;
-  }
-  return { before: a, after: b, changes: [{ oldStart: head, oldEnd: x.length - tail, newStart: head, newEnd: y.length - tail }], coarse: true };
+  return out.join("");
 }
 
 /** A line of a comparison as it is shown, or a run of lines that are the same on both sides and are not shown. */
 export type DiffRow =
-  | { kind: "same" | "removed" | "added"; text: string; oldLine: number | null; newLine: number | null }
+  /** `change` is which change of the comparison a line that was taken away or added belongs to, and null for a line that is the same */
+  | { kind: "same" | "removed" | "added"; text: string; oldLine: number | null; newLine: number | null; change: number | null }
   /** `oldStart` and `newStart` are where the run starts in each text, and `count` how many lines it has */
   | { kind: "fold"; oldStart: number; newStart: number; count: number };
 
@@ -312,10 +465,10 @@ export function* diffRows(diffed: TextDiff, context = 3): Generator<DiffRow> {
       break;
     }
     for (let line = change.oldStart; line < change.oldEnd; line++) {
-      yield { kind: "removed", text: before[line], oldLine: line + 1, newLine: null };
+      yield { kind: "removed", text: before[line], oldLine: line + 1, newLine: null, change: i };
     }
     for (let line = change.newStart; line < change.newEnd; line++) {
-      yield { kind: "added", text: after[line], oldLine: null, newLine: line + 1 };
+      yield { kind: "added", text: after[line], oldLine: null, newLine: line + 1, change: i };
     }
     oldAt = change.oldEnd;
     newAt = change.newEnd;
@@ -325,7 +478,7 @@ export function* diffRows(diffed: TextDiff, context = 3): Generator<DiffRow> {
 /** Rows for lines that are the same on both sides: `count` of them from `oldStart` of the old text. */
 export function* sameRows(before: string[], oldStart: number, newStart: number, count: number): Generator<DiffRow> {
   for (let i = 0; i < count; i++) {
-    yield { kind: "same", text: before[oldStart + i], oldLine: oldStart + i + 1, newLine: newStart + i + 1 };
+    yield { kind: "same", text: before[oldStart + i], oldLine: oldStart + i + 1, newLine: newStart + i + 1, change: null };
   }
 }
 

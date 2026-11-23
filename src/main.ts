@@ -82,7 +82,7 @@ export default class PiecemealGitPlugin extends Plugin {
       this.registerEvent(this.app.vault.on("delete", gone));
       // What changed since the last sync is shown where a report is on the screen, and follows the vault
       for (const what of ["create", "modify", "delete", "rename"] as const) {
-        this.registerEvent(this.app.vault.on(what as "modify", () => this.lookSoon()));
+        this.registerEvent(this.app.vault.on(what as "modify", () => this.changedSince()));
       }
       this.registerEvent(
         this.app.vault.on("rename", (file, before) => {
@@ -98,8 +98,6 @@ export default class PiecemealGitPlugin extends Plugin {
       this.registerEvent(
         this.app.workspace.on("layout-change", () => {
           this.onePanel();
-          // A sidebar that is opened shows the panel, with what is true now
-          this.lookSoon();
         }),
       );
       if (this.config.onStart) {
@@ -462,6 +460,7 @@ export default class PiecemealGitPlugin extends Plugin {
       return;
     }
     this.looking = true;
+    this.stale = false;
     try {
       const local = await localChanges(this.common().options);
       this.changes = local.synced ? local.changes : null;
@@ -475,16 +474,37 @@ export default class PiecemealGitPlugin extends Plugin {
     this.redraw();
   }
 
-  /** Looks at the vault if a report is on the screen to show what is found. Called often, so it waits for a quiet moment. */
+  /**
+   * Looks at the vault if a report is on the screen to show what is found.
+   * Called for every change of a file, so it waits for a quiet moment. With
+   * no report on the screen nothing is looked at: `stale` is kept, and the
+   * report looks when it comes onto the screen.
+   */
   private readonly lookSoon = debounce(
     () => {
-      if (this.reports().some((report) => report.isShown())) {
+      if (this.stale && this.reports().some((report) => report.isShown())) {
         void this.look();
       }
     },
     2000,
     true,
   );
+
+  /** True if the vault may have changed since it was looked at */
+  private stale = true;
+
+  /** Called when a file of the vault changed, or a sync ended that left something unsent. */
+  private changedSince(): void {
+    this.stale = true;
+    this.lookSoon();
+  }
+
+  /** Called when a report comes onto the screen: it shows what is true now, and not what was true when it was last seen. */
+  shown(): void {
+    if (this.stale || !this.looked) {
+      void this.look();
+    }
+  }
 
   /** True once the vault was looked at, whatever was found */
   looked = false;
@@ -542,7 +562,9 @@ export default class PiecemealGitPlugin extends Plugin {
     const nothing = new Uint8Array(0);
     new DiffModal(this.app, {
       title: original,
-      what: "The version of the repository, and the copy beside it: − is a line that only the repository has, + one that only the copy has.",
+      what: "The version of the repository, and the copy beside it.",
+      legend:
+        "− is a line that only the repository has, + one that only the copy has. Each change keeps the lines of the repository unless you choose otherwise there. What you save takes the place of the file, and the copy goes.",
       waiting: "Reading the two…",
       beforeSize: theirs instanceof TFile ? theirs.stat.size : null,
       afterSize: copy.stat.size,
@@ -557,6 +579,13 @@ export default class PiecemealGitPlugin extends Plugin {
           },
         },
       ],
+      choose: {
+        before: "Repository's",
+        after: "The copy's",
+        save: async (text) => {
+          await this.takeCopy(copy, original, new TextEncoder().encode(text).buffer);
+        },
+      },
     }).open();
   }
 
@@ -566,9 +595,12 @@ export default class PiecemealGitPlugin extends Plugin {
     this.redraw();
   }
 
-  /** Is done with a copy by putting it in the place of the file that it is beside. False if that cannot be done. */
-  async takeCopy(copy: TFile, original: string): Promise<boolean> {
-    const data = await this.app.vault.readBinary(copy);
+  /**
+   * Is done with a copy by putting it in the place of the file that it is beside. False if that cannot be done.
+   * @param put what to put there in place of what the copy holds: the text that was made of the two
+   */
+  async takeCopy(copy: TFile, original: string, put?: ArrayBuffer): Promise<boolean> {
+    const data = put ?? (await this.app.vault.readBinary(copy));
     const now = this.app.vault.getAbstractFileByPath(original);
     if (now instanceof TFile) {
       await this.app.vault.modifyBinary(now, data);
@@ -668,6 +700,14 @@ export default class PiecemealGitPlugin extends Plugin {
       });
       this.rewritten += fs.rewritten;
       this.lastResult = result;
+      if (result.busy.length === 0 && result.tooLargeChanged.length === 0) {
+        // All that was changed here is sent, so there is nothing left that differs: known without a look at the vault
+        this.changes = [];
+        this.looked = true;
+        this.stale = false;
+      } else {
+        this.changedSince();
+      }
       await this.stayOn(result);
       const toLookAt = concerns(result);
       this.last = {
@@ -705,8 +745,6 @@ export default class PiecemealGitPlugin extends Plugin {
       this.progress = null;
       // Draws every report anew as well
       this.saveState();
-      // What was sent is no change any more, and what was taken is none either
-      void this.look();
     }
   }
 }

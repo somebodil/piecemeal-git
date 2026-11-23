@@ -98,8 +98,7 @@ export class Report {
   private changed(): void {
     const { el, plugin } = this;
     if (!plugin.looked) {
-      // Not looked at yet. The plugin draws the report anew when it has.
-      void plugin.look();
+      // Not looked at yet. It is when the report comes onto the screen, and the plugin draws the report anew then.
       return;
     }
     const { changes } = plugin;
@@ -265,11 +264,13 @@ export class Report {
 /** The report as a dialog. */
 export class ReportModal extends Modal {
   readonly report: Report;
+  private readonly plugin: PiecemealGitPlugin;
   private readonly closed: () => void;
 
   /** @param closed called when the dialog is gone from the screen */
   constructor(app: App, plugin: PiecemealGitPlugin, closed: () => void) {
     super(app);
+    this.plugin = plugin;
     this.report = new Report(app, plugin, this.contentEl, () => this.close());
     this.closed = closed;
   }
@@ -278,6 +279,7 @@ export class ReportModal extends Modal {
     this.modalEl.addClass("piecemeal-git-modal");
     this.setTitle("Sync with the repository");
     this.report.render();
+    this.plugin.shown();
   }
 
   override onClose(): void {
@@ -296,9 +298,13 @@ export const VIEW_TYPE = "piecemeal-git";
  */
 export class SyncView extends ItemView {
   readonly report: Report;
+  private readonly plugin: PiecemealGitPlugin;
+  /** Tells when the panel comes onto the screen: when its sidebar opens, or its tab is the one in front */
+  private seen: IntersectionObserver | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: PiecemealGitPlugin) {
     super(leaf);
+    this.plugin = plugin;
     this.report = new Report(this.app, plugin, this.contentEl, () => undefined);
   }
 
@@ -317,10 +323,19 @@ export class SyncView extends ItemView {
   override onOpen(): Promise<void> {
     this.contentEl.addClass("piecemeal-git-view");
     this.report.render();
+    // While the panel is out of sight the vault is not looked at. When it comes into sight, it is.
+    this.seen = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        this.plugin.shown();
+      }
+    });
+    this.seen.observe(this.contentEl);
     return Promise.resolve();
   }
 
   override onClose(): Promise<void> {
+    this.seen?.disconnect();
+    this.seen = null;
     this.contentEl.empty();
     return Promise.resolve();
   }

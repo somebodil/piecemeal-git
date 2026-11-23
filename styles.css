@@ -242,7 +242,41 @@
   cursor: var(--cursor);
 }
 
-/* A phone has no room for both numbers of a line. */
-.is-phone .piecemeal-git-diff-no:first-child {
-  display: none;
+/* A row that is out of sight costs nothing to lay out. */
+.piecemeal-git-diff-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 1.5em;
+}
+
+.piecemeal-git-diff-foot {
+  flex: none;
+}
+
+/* Where a person says for each change which version to keep: the buttons of a change, and what the choice leaves out. */
+.piecemeal-git-diff-pick {
+  display: flex;
+  gap: var(--size-2-2);
+  padding: var(--size-2-2) var(--size-4-2);
+  background-color: var(--background-secondary);
+  border-top: var(--border-width) solid var(--background-modifier-border);
+  font-family: var(--font-interface);
+}
+
+.piecemeal-git-diff-pick button {
+  height: auto;
+  padding: var(--size-2-1) var(--size-4-2);
+  font-size: var(--font-ui-smaller);
+}
+
+.piecemeal-git-diff-change[data-choice="0"] .piecemeal-git-diff-pick-0,
+.piecemeal-git-diff-change[data-choice="1"] .piecemeal-git-diff-pick-1,
+.piecemeal-git-diff-change[data-choice="2"] .piecemeal-git-diff-pick-2 {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.piecemeal-git-diff-choosing .piecemeal-git-diff-change[data-choice="0"] .piecemeal-git-diff-added,
+.piecemeal-git-diff-choosing .piecemeal-git-diff-change[data-choice="1"] .piecemeal-git-diff-removed {
+  opacity: 0.45;
+  text-decoration: line-through;
 }
