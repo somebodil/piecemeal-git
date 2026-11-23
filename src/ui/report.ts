@@ -36,6 +36,8 @@ export class Report {
   private readonly leave: () => void;
   /** Where it says how far a sync is. Null until the report is drawn. */
   private progressEl: HTMLElement | null = null;
+  /** Where it says how long ago the last sync was. Null while there is none to tell of. */
+  private agoEl: HTMLElement | null = null;
 
   constructor(app: App, plugin: PiecemealGitPlugin, el: HTMLElement, leave: () => void) {
     this.app = app;
@@ -89,6 +91,20 @@ export class Report {
     this.progressEl?.setText(text);
   }
 
+  /** How the last sync went and how long ago it was, in a line. */
+  private when(): string {
+    const { last } = this.plugin;
+    if (last === null) {
+      return "";
+    }
+    return last.ok ? `Synced ${ago(last.at)}.` : `The last sync failed, ${ago(last.at)}.`;
+  }
+
+  /** Brings up to date what changes as time goes by. */
+  tick(): void {
+    this.agoEl?.setText(this.when());
+  }
+
   /** Draws all of it anew. */
   render(): void {
     const { el, plugin } = this;
@@ -96,12 +112,13 @@ export class Report {
 
     const { last } = plugin;
     const state = el.createDiv({ cls: "piecemeal-git-state" });
+    this.agoEl = null;
     if (plugin.config.url === "") {
       state.setText("No repository yet. Give its address in the settings.");
     } else if (last === null) {
       state.setText("Not synced yet.");
     } else {
-      state.createDiv({ text: last.ok ? `Synced ${ago(last.at)}.` : `The last sync failed, ${ago(last.at)}.`, cls: last.ok ? "" : "piecemeal-git-failed-text" });
+      this.agoEl = state.createDiv({ text: this.when(), cls: last.ok ? "" : "piecemeal-git-failed-text" });
       // What it did is told below, file by file. Why it failed is told nowhere else.
       state.createDiv({ text: last.ok && plugin.lastResult !== null ? headline(plugin.lastResult) : last.text, cls: "piecemeal-git-note" });
     }
@@ -124,7 +141,7 @@ export class Report {
     if (copies.length > 0) {
       el.createEl("h4", { text: `Changed on both sides (${copies.length})` });
       el.createEl("p", {
-        text: "Both this device and another one changed these files. The version of the repository took the name, and yours is beside it as a copy. Look at the two, then keep one.",
+        text: "Two devices changed these files. The version of the repository took the name, and the one of the device that synced later is beside it as a copy. Look at the two, then keep one.",
         cls: "piecemeal-git-note",
       });
       for (const path of copies.slice(0, 200)) {
@@ -153,14 +170,14 @@ export class Report {
         theirs.createSpan({ text: "The repository's: ", cls: "piecemeal-git-label" });
         this.path(theirs, original);
         const mine = box.createDiv();
-        mine.createSpan({ text: "Yours: ", cls: "piecemeal-git-label" });
+        mine.createSpan({ text: "The copy: ", cls: "piecemeal-git-label" });
         this.path(mine, copy.path);
         const choice = box.createDiv({ cls: "piecemeal-git-buttons" });
         new ButtonComponent(choice).setButtonText("Keep the repository's").onClick(async () => {
           await this.app.fileManager.trashFile(copy);
           plugin.redraw();
         });
-        new ButtonComponent(choice).setButtonText("Take mine back").onClick(async () => {
+        new ButtonComponent(choice).setButtonText("Take the copy").onClick(async () => {
           const data = await this.app.vault.readBinary(copy);
           const mineNow = this.app.vault.getAbstractFileByPath(original);
           if (mineNow instanceof TFile) {

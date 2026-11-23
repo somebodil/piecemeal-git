@@ -1003,8 +1003,8 @@ describe("sync", () => {
       // What changes is written as before
       w.writePhone("a.md", "a, changed\n");
       await w.syncPhone({ fs });
-      // The commit and its folder are kept, and what was agreed on is noted
-      assert.deepEqual(written.filter((file) => !file.startsWith(".piecemeal/objects/")), [".piecemeal/state.json"]);
+      // The commit and its folder are kept, the files of the commit are noted, and what was agreed on
+      assert.deepEqual(written.filter((file) => !file.startsWith(".piecemeal/objects/")), [".piecemeal/flat.json", ".piecemeal/state.json"]);
     });
 
     it("asks the vault a few things at once, never many, and while the remote answers", async () => {
@@ -1117,6 +1117,52 @@ describe("sync", () => {
       const again = await w.syncPhone({ fs });
       assert.deepEqual([again.deletedThere, again.deletedHere, again.downloaded], [["dir 1/note 1.md"], [], []]);
       assert.ok(objects > 0);
+    });
+
+    it("knows the remote by one file also after it moved the remote itself", async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 12; i++) {
+        files[`dir ${i % 6}/note ${i}.md`] = `note ${i}\n`;
+      }
+      const w = setup(files);
+      await w.syncPhone();
+      const fs = new NodeFs(w.phoneDir);
+      const read = fs.read.bind(fs);
+      let objects = 0;
+      fs.read = (file) => {
+        objects += file.startsWith(".piecemeal/objects/") ? 1 : 0;
+        return read(file);
+      };
+      // What the phone sends: a change, a new file in a new folder, a removal, and a file with another name
+      w.writePhone("dir 0/note 0.md", "changed on the phone\n");
+      w.writePhone("new dir/deep/new.md", "new\n");
+      w.removePhone("dir 1/note 1.md");
+      renameSync(path.join(w.phoneDir, "dir 2/note 2.md"), path.join(w.phoneDir, "dir 2/renamed.md"));
+      const sent = await w.syncPhone({ fs });
+      assert.deepEqual(sent.uploaded.sort(), ["dir 0/note 0.md", "dir 2/renamed.md", "new dir/deep/new.md"]);
+      objects = 0;
+      const quiet = await w.syncPhone({ fs });
+      assert.deepEqual([quiet.downloaded, quiet.uploaded, quiet.deletedHere, quiet.deletedThere, objects], [[], [], [], [], 0]);
+
+      // What was noted is what the remote holds: the next changes of both sides go where they belong
+      w.pullPc();
+      assert.deepEqual([w.readPc("dir 0/note 0.md"), w.readPc("new dir/deep/new.md"), w.readPc("dir 1/note 1.md"), w.readPc("dir 2/renamed.md")], ["changed on the phone\n", "new\n", null, "note 2\n"]);
+      w.writePc("dir 3/note 3.md", "changed on the computer\n");
+      w.writePc("new dir/deep/other.md", "other\n");
+      w.pushPc();
+      w.writePhone("dir 4/note 4.md", "changed on the phone\n");
+      const both = await w.syncPhone({ fs });
+      assert.deepEqual([both.downloaded.sort(), both.uploaded], [["dir 3/note 3.md", "new dir/deep/other.md"], ["dir 4/note 4.md"]]);
+      w.pullPc();
+      assert.equal(w.readPc("dir 4/note 4.md"), "changed on the phone\n");
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+      assert.deepEqual(
+        w.pathsThere(),
+        readdirSync(w.phoneDir, { recursive: true, withFileTypes: true })
+          .filter((entry) => entry.isFile() && !entry.parentPath.includes(".piecemeal"))
+          .map((entry) => path.relative(w.phoneDir, path.join(entry.parentPath, entry.name)))
+          .sort(),
+      );
     });
 
     it("takes the word of the app for a file that is as it was, and looks at the disk for any other", async () => {

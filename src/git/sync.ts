@@ -721,13 +721,18 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     return { ...(await flatten(store, root)), root };
   };
 
+  /**
+   * The files of a commit of the remote, as they were read from its folders
+   * or as this device sent them. A remote that is at that commit is then
+   * known by this one file, and not by one for each of its folders.
+   */
+  const flatPath = `${options.storeDir}/flat.json`;
   let there = new Map<string, Entry>();
   let knownTrees = new Set<string>();
   let thereRoot: string | null = null;
   if (tip !== null) {
     // The files of a commit, as they were read from its folders the last time. A remote that
     // has not moved is then known by one file, and not by one for each of its folders.
-    const flatPath = `${options.storeDir}/flat.json`;
     let read: { entries: Map<string, Entry>; trees: Set<string>; root: string } | null = null;
     try {
       const kept = await fs.read(flatPath);
@@ -1253,6 +1258,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
 
   /** True once the sync has done all that it set out to do */
   let ended = false;
+  /** The commit that this device sent last in this sync, with the files that it holds, or null if it sent none */
+  let sentTree: { commit: string; root: string; entries: Record<string, Entry>; trees: string[] } | null = null;
   const saveState = async (): Promise<void> => {
     const next: State = {
       version: 1,
@@ -1380,6 +1387,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         tip = commitOid;
         refTip = commitOid;
         thereRoot = built.root;
+        sentTree = { commit: commitOid, root: built.root, entries: Object.fromEntries(target), trees: [...built.trees.keys()] };
         log(`sent ${blobs.length} file(s) as ${commitOid.slice(0, 7)}`);
       }
       for (const { path, entry, stat } of sent) {
@@ -1393,6 +1401,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         agreed.delete(path);
         absent.delete(path);
       }
+    }
+
+    if (sentTree !== null) {
+      // The remote is at a commit that this device made. Its files are known, and are noted as if they
+      // had been read from its folders, so that the next sync does not read every folder to know them.
+      await fs.write(flatPath, encode(JSON.stringify(sentTree)));
     }
 
     if (refTip === null && tip !== null) {

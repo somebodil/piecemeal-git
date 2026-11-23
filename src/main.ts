@@ -142,6 +142,8 @@ export default class PiecemealGitPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     await this.saveData({ ...this.config, last: this.last, panelPlaced: this.panelPlaced });
     this.refresh();
+    // What the reports say depends on the settings too: without an address there is nothing to sync with
+    this.redraw();
   }
 
   /**
@@ -268,9 +270,12 @@ export default class PiecemealGitPlugin extends Plugin {
       this.statusEl.createSpan({ text: words.replace(/^Syncing… /, "") });
       this.statusEl.setAttribute("aria-label", "Show what the last sync did");
     }
-    if (this.running) {
-      for (const report of this.reports()) {
+    for (const report of this.reports()) {
+      if (this.running) {
         report.progress(words);
+      } else {
+        // How long ago the last sync was changes by itself as time goes by
+        report.tick();
       }
     }
   }
@@ -463,8 +468,8 @@ export default class PiecemealGitPlugin extends Plugin {
     } finally {
       this.running = false;
       this.progress = null;
+      // Draws every report anew as well
       await this.saveSettings();
-      this.redraw();
     }
   }
 }
