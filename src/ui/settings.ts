@@ -2,42 +2,8 @@ import { type App, PluginSettingTab, SecretComponent, Setting, type SettingDefin
 import { lsRefs, remoteOf } from "../git/protocol.ts";
 import type PiecemealGitPlugin from "../main.ts";
 import { obsidianHttp } from "../platform/obsidian.ts";
+import { type Settings } from "./stored.ts";
 import { ago, explain, httpsAddress } from "./words.ts";
-
-export interface Settings {
-  /** The address of the repository, as `git clone` takes it over HTTPS */
-  url: string;
-  /** The branch to sync with. Empty for the one the repository opens with. */
-  branch: string;
-  /** The name under which the token is kept in the secret storage of Obsidian */
-  tokenSecret: string;
-  /** Who the commits of this device are by */
-  authorName: string;
-  authorEmail: string;
-  /** What the commits of this device call it */
-  device: string;
-  /** A file larger than this many megabytes is not sent from this device */
-  maxFileMB: number;
-  /** What both sides changed in different places of a text is put together, as git does */
-  mergeText: boolean;
-  /** A sync starts by itself every so many minutes. 0 for never. */
-  everyMinutes: number;
-  /** A sync starts by itself when Obsidian has opened the vault */
-  onStart: boolean;
-}
-
-export const DEFAULTS: Settings = {
-  url: "",
-  branch: "",
-  tokenSecret: "",
-  authorName: "",
-  authorEmail: "",
-  device: "",
-  maxFileMB: 20,
-  mergeText: true,
-  everyMinutes: 0,
-  onStart: false,
-};
 
 /** A row of the settings: what it is called, and which of the settings it holds. */
 type Row = { name: string; desc?: string } & (
@@ -241,7 +207,7 @@ export class SettingsTab extends PluginSettingTab {
     } else {
       settings[row.key] = typeof value === "string" ? value.trim() : "";
     }
-    await this.plugin.saveSettings();
+    this.plugin.saveSettings();
     if (row.key === "everyMinutes") {
       this.plugin.schedule();
     }

@@ -6,7 +6,8 @@ import { CancelledError, type Progress, sync, type SyncResult } from "./git/sync
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 import { ConfirmModal } from "./ui/confirm.ts";
 import { conflictCopies, isCopy, type Report, ReportModal, SyncView, VIEW_TYPE } from "./ui/report.ts";
-import { DEFAULTS, type Settings, SettingsTab } from "./ui/settings.ts";
+import { SettingsTab } from "./ui/settings.ts";
+import { DEFAULTS, type DeviceState, type Last, readStored, type Settings, SETTINGS_KEY, STATE_KEY } from "./ui/stored.ts";
 import { ago, concerns, explain, headline, notes, progressText, restart, worthAsking } from "./ui/words.ts";
 
 const MB = 1024 * 1024;
@@ -14,17 +15,6 @@ const MB = 1024 * 1024;
 const STORE_DIR = ".piecemeal";
 /** About how much content one request asks for or sends */
 const BATCH_BYTES = 4 * MB;
-
-/** How the last sync went. Kept with the settings, so that it is known after Obsidian starts again. */
-export interface Last {
-  /** When it ended, in milliseconds since 1970 */
-  at: number;
-  ok: boolean;
-  /** What it did, or why it failed, in a line */
-  text: string;
-  /** True if it left something for a person to look at */
-  attention: boolean;
-}
 
 export default class PiecemealGitPlugin extends Plugin {
   config: Settings = { ...DEFAULTS };
@@ -50,15 +40,11 @@ export default class PiecemealGitPlugin extends Plugin {
    * then on by what Obsidian tells about files that come and go.
    */
   readonly copies = new Set<string>();
-  /** True once the panel was put into a sidebar. It is put there once: who closes it does not get it back. */
+  /** True once the panel was put into a sidebar */
   private panelPlaced = false;
 
   override async onload(): Promise<void> {
-    const data = ((await this.loadData()) ?? {}) as Partial<Settings> & { last?: Last | null; panelPlaced?: boolean };
-    const { last, panelPlaced, ...config } = data;
-    this.config = { ...DEFAULTS, ...config };
-    this.last = last ?? null;
-    this.panelPlaced = panelPlaced === true;
+    await this.readStored();
     this.addSettingTab(new SettingsTab(this.app, this));
     this.schedule();
     this.registerView(VIEW_TYPE, (leaf) => new SyncView(leaf, this));
@@ -139,10 +125,61 @@ export default class PiecemealGitPlugin extends Plugin {
     this.report?.close();
   }
 
-  async saveSettings(): Promise<void> {
-    await this.saveData({ ...this.config, last: this.last, panelPlaced: this.panelPlaced });
+  /**
+   * Reads the settings, and what else is kept, from the storage that Obsidian
+   * gives the vault on this device. A device that had them in the file
+   * `data.json` of the plugin, as before, takes them from there once, and the
+   * file goes: left there, it would look as if the settings were in it.
+   */
+  private async readStored(): Promise<void> {
+    const settings: unknown = this.app.loadLocalStorage(SETTINGS_KEY);
+    const state: unknown = this.app.loadLocalStorage(STATE_KEY);
+    const path = this.manifest.dir === undefined ? null : `${this.manifest.dir}/data.json`;
+    const { adapter } = this.app.vault;
+    /** True if the settings are in the storage of the app, so that the file of before has nothing to say */
+    const kept = typeof settings === "object" && settings !== null;
+    let file: unknown = null;
+    let fileIsThere = false;
+    try {
+      fileIsThere = path !== null && (await adapter.exists(path));
+      if (fileIsThere && !kept) {
+        // Not what Obsidian reads the file with: that takes a file that is cut off for no file at all
+        file = JSON.parse(await adapter.read(path!));
+      }
+    } catch (error) {
+      // There, and not to be read. The settings start as the plugin comes, and the file stays for a person to look at.
+      console.error("piecemeal-git: the settings of before could not be read", error);
+      fileIsThere = false;
+    }
+    const stored = readStored(settings, state, file);
+    this.config = stored.config;
+    this.last = stored.state.last;
+    this.panelPlaced = stored.state.panelPlaced;
+    if (stored.fromFile) {
+      this.app.saveLocalStorage(SETTINGS_KEY, this.config);
+      this.app.saveLocalStorage(STATE_KEY, { last: this.last, panelPlaced: this.panelPlaced } satisfies DeviceState);
+    }
+    if (fileIsThere && path !== null && (stored.fromFile || kept)) {
+      try {
+        await adapter.remove(path);
+      } catch (error) {
+        console.error("piecemeal-git: the file of the settings of before could not be removed", error);
+      }
+    }
+  }
+
+  /** Keeps the settings, after one of them changed. */
+  saveSettings(): void {
+    this.app.saveLocalStorage(SETTINGS_KEY, this.config);
     this.refresh();
     // What the reports say depends on the settings too: without an address there is nothing to sync with
+    this.redraw();
+  }
+
+  /** Keeps how the last sync went and that the panel has its place, and shows it. */
+  private saveState(): void {
+    this.app.saveLocalStorage(STATE_KEY, { last: this.last, panelPlaced: this.panelPlaced } satisfies DeviceState);
+    this.refresh();
     this.redraw();
   }
 
@@ -159,7 +196,7 @@ export default class PiecemealGitPlugin extends Plugin {
       await this.app.workspace.getRightLeaf(false)?.setViewState({ type: VIEW_TYPE, active: false });
     }
     this.panelPlaced = true;
-    await this.saveSettings();
+    this.saveState();
   }
 
   /** Shows the panel, and puts it into the right sidebar first if it is in neither. */
@@ -469,7 +506,7 @@ export default class PiecemealGitPlugin extends Plugin {
       this.running = false;
       this.progress = null;
       // Draws every report anew as well
-      await this.saveSettings();
+      this.saveState();
     }
   }
 }

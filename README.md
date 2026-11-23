@@ -20,6 +20,8 @@ Try it on a copy of a vault first. It has run on an emulated phone, and on a dev
 - It talks to the server of the repository that you name, and to nothing else, with one exception.
 - For a repository on github.com it also asks `api.github.com` for the sizes of the files and for the parts of files that are too large for one answer. It sends the token there too, since a private repository answers to nothing else.
 - The token is kept in the secret storage of Obsidian. It is not written into the vault and not into the settings of the plugin.
+- The settings, and how the last sync went, are kept on the device, in the storage that Obsidian gives a vault there. None of it is in a file of the vault. So nothing that syncs the vault takes the settings of one device to another, and no write that goes wrong loses them. They are gone when the data of the app is cleared or Obsidian is installed anew, as the token is: then the address and the token are given again.
+- Up to 0.1.4 they were in the file `data.json` of the plugin, which a sync wrote every time. A device that still has that file takes its settings from there once, and removes the file.
 - It counts nothing and reports nothing to anyone.
 
 ## State
@@ -154,7 +156,7 @@ A release is made by a tag with the version of `manifest.json` as its name. GitH
 - `src/platform` holds how the plugin reads and writes files and talks to a server inside Obsidian.
 - `tests` holds what runs on Node.js only and is no part of the plugin: files and HTTP for the tests, the git server that they talk to, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
 - `src/main.ts` is the plugin: the commands, the icon, and what it tells you while a sync runs and after it.
-- `src/ui` holds the settings, the two dialogs, the panel of the sidebar, and the words that the plugin says. `styles.css` is how they look.
+- `src/ui` holds the settings and how they are kept, the two dialogs, the panel of the sidebar, and the words that the plugin says. `styles.css` is how they look.
 - `node tests/bench.ts [notes]` times the kinds of sync on a vault of that many notes, against the git server of the tests.
 
 ## License
