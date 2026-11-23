@@ -519,7 +519,68 @@ export default class PiecemealGitPlugin extends Plugin {
 
   /** Shows what changed in a file since the last sync. */
   openDiff(change: LocalChange): void {
-    new DiffModal(this.app, this, change).open();
+    const nothing = new Uint8Array(0);
+    new DiffModal(this.app, {
+      title: change.path,
+      what: change.kind === "new" ? "A new file." : change.kind === "removed" ? "Removed from this vault." : "Changed since the last sync.",
+      waiting: change.kind === "new" ? "Reading the file…" : "Asking the repository for the file as it was…",
+      beforeSize: change.beforeSize,
+      afterSize: change.size,
+      before: async () => (change.before === null ? nothing : await this.contentBefore(change.before)),
+      after: async () => (change.kind === "removed" ? nothing : ((await this.contentNow(change.path)) ?? nothing)),
+    }).open();
+  }
+
+  /**
+   * Shows how the two versions of a file that two devices changed differ:
+   * the one of the repository, which has the name, and the copy beside it.
+   * Both are in the vault, so nothing is asked of the repository. What can
+   * be done about the two is under the comparison.
+   */
+  openCopyDiff(copy: TFile, original: string): void {
+    const theirs = this.app.vault.getAbstractFileByPath(original);
+    const nothing = new Uint8Array(0);
+    new DiffModal(this.app, {
+      title: original,
+      what: "The version of the repository, and the copy beside it: − is a line that only the repository has, + one that only the copy has.",
+      waiting: "Reading the two…",
+      beforeSize: theirs instanceof TFile ? theirs.stat.size : null,
+      afterSize: copy.stat.size,
+      before: async () => (theirs instanceof TFile ? new Uint8Array(await this.app.vault.readBinary(theirs)) : nothing),
+      after: async () => new Uint8Array(await this.app.vault.readBinary(copy)),
+      actions: [
+        { text: "Keep the repository's", run: () => this.dropCopy(copy) },
+        {
+          text: "Take the copy",
+          run: async () => {
+            await this.takeCopy(copy, original);
+          },
+        },
+      ],
+    }).open();
+  }
+
+  /** Is done with a copy by keeping the version of the repository: the copy goes where Obsidian puts files that are deleted. */
+  async dropCopy(copy: TFile): Promise<void> {
+    await this.app.fileManager.trashFile(copy);
+    this.redraw();
+  }
+
+  /** Is done with a copy by putting it in the place of the file that it is beside. False if that cannot be done. */
+  async takeCopy(copy: TFile, original: string): Promise<boolean> {
+    const data = await this.app.vault.readBinary(copy);
+    const now = this.app.vault.getAbstractFileByPath(original);
+    if (now instanceof TFile) {
+      await this.app.vault.modifyBinary(now, data);
+    } else if (now === null) {
+      await this.app.vault.createBinary(original, data);
+    } else {
+      new Notice(`${original} is a folder now. The copy stays.`);
+      return false;
+    }
+    await this.app.fileManager.trashFile(copy);
+    this.redraw();
+    return true;
   }
 
   /**

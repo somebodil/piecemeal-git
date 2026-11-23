@@ -1,8 +1,24 @@
-import { type App, Modal } from "obsidian";
+import { type App, ButtonComponent, Modal } from "obsidian";
 import { diffCounts, type DiffRow, diffRows, diffText, sameRows, type TextDiff } from "../git/merge.ts";
-import { type LocalChange } from "../git/sync.ts";
-import type PiecemealGitPlugin from "../main.ts";
 import { explain } from "./words.ts";
+
+/** Two versions of a file to compare, and what to say about them. */
+export interface Comparison {
+  /** The path of the file, which is what the dialog is called */
+  title: string;
+  /** What the two are, in a sentence: it stands above the comparison */
+  what: string;
+  /** What is said while the two are read */
+  waiting: string;
+  /** How large each is, where that is known before it is read. One that is too large is not read. */
+  beforeSize: number | null;
+  afterSize: number | null;
+  /** Reads the version whose lines are shown as taken away, and the one whose lines are shown as added */
+  before: () => Promise<Uint8Array>;
+  after: () => Promise<Uint8Array>;
+  /** What can be done about the two, as buttons under the comparison. The dialog closes when one is done. */
+  actions?: { text: string; cta?: boolean; run: () => Promise<void> }[];
+}
 
 /** A file larger than this, as it was or as it is, is not compared */
 export const DIFF_MAX_BYTES = 5 * 1024 * 1024;
@@ -13,10 +29,10 @@ const LINES_OF_A_FOLD = 400;
 /** How near the end of what is drawn has to come, in pixels, for more to be drawn */
 const NEAR_THE_END = 600;
 
-const NOTHING = new Uint8Array(0);
-
 /**
- * What changed in one file since the vault was last synced, line by line.
+ * Two versions of a file, compared line by line: a file as it was at the
+ * last sync and as it is, or the two versions of a file that two devices
+ * changed.
  *
  * Only what changed is shown, with a few lines around it. The lines that are
  * the same on both sides are folded, and a fold opens when it is pressed.
@@ -24,20 +40,18 @@ const NOTHING = new Uint8Array(0);
  * on the screen at once and costs what is looked at of it.
  */
 export class DiffModal extends Modal {
-  private readonly plugin: PiecemealGitPlugin;
-  private readonly change: LocalChange;
+  private readonly comparison: Comparison;
   /** False once the dialog is closed, so that what comes late is not drawn into it */
   private open_ = true;
 
-  constructor(app: App, plugin: PiecemealGitPlugin, change: LocalChange) {
+  constructor(app: App, comparison: Comparison) {
     super(app);
-    this.plugin = plugin;
-    this.change = change;
+    this.comparison = comparison;
   }
 
   override onOpen(): void {
     this.modalEl.addClass("piecemeal-git-modal", "piecemeal-git-diff-modal");
-    this.setTitle(this.change.path);
+    this.setTitle(this.comparison.title);
     void this.load();
   }
 
@@ -46,28 +60,49 @@ export class DiffModal extends Modal {
     this.contentEl.empty();
   }
 
-  private say(text: string, cls = "piecemeal-git-note"): void {
+  /** Says one thing in place of the comparison. What can be done about the two stays under it. */
+  private say(text: string, cls = "piecemeal-git-note", withActions = true): void {
     this.contentEl.empty();
     this.contentEl.createEl("p", { text, cls });
+    if (withActions) {
+      this.actions();
+    }
+  }
+
+  /** The buttons for what can be done about the two versions. */
+  private actions(): void {
+    const actions = this.comparison.actions ?? [];
+    if (actions.length === 0) {
+      return;
+    }
+    const row = this.contentEl.createDiv({ cls: "piecemeal-git-buttons" });
+    for (const action of actions) {
+      const button = new ButtonComponent(row).setButtonText(action.text).onClick(async () => {
+        await action.run();
+        this.close();
+      });
+      if (action.cta === true) {
+        button.setCta();
+      }
+    }
   }
 
   private async load(): Promise<void> {
-    const { change, plugin } = this;
-    const what = change.kind === "new" ? "A new file." : change.kind === "removed" ? "Removed from this vault." : "Changed since the last sync.";
-    if ((change.size ?? 0) > DIFF_MAX_BYTES || (change.beforeSize ?? 0) > DIFF_MAX_BYTES) {
+    const { what } = this.comparison;
+    if ((this.comparison.afterSize ?? 0) > DIFF_MAX_BYTES || (this.comparison.beforeSize ?? 0) > DIFF_MAX_BYTES) {
       this.say(`${what} Diff not supported: the file is larger than 5 MB.`);
       return;
     }
-    this.say(change.kind === "new" ? "Reading the file…" : "Asking the repository for the file as it was…");
+    this.say(this.comparison.waiting, "piecemeal-git-note", false);
     let before: Uint8Array;
     let after: Uint8Array;
     try {
-      // What the file holds now is read first: without it there is nothing to ask the repository for
-      after = change.kind === "removed" ? NOTHING : ((await plugin.contentNow(change.path)) ?? NOTHING);
-      before = change.before === null ? NOTHING : await plugin.contentBefore(change.before);
+      // What is on the device is read first: without it there is nothing to ask the repository for
+      after = await this.comparison.after();
+      before = await this.comparison.before();
     } catch (error) {
       if (this.open_) {
-        this.say(`The file as it was could not be had from the repository. ${explain(error)}`, "piecemeal-git-failed-text");
+        this.say(`The two could not be read. ${explain(error)}`, "piecemeal-git-failed-text");
       }
       return;
     }
@@ -84,7 +119,7 @@ export class DiffModal extends Modal {
       return;
     }
     if (diffed.changes.length === 0) {
-      this.say("The file holds what it held at the last sync.");
+      this.say("The two hold the same.");
       return;
     }
     this.draw(diffed, what);
@@ -126,6 +161,7 @@ export class DiffModal extends Modal {
       }
     };
     body.addEventListener("scroll", more, { passive: true });
+    this.actions();
     more();
   }
 

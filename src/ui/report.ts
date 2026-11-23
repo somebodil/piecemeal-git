@@ -1,4 +1,4 @@
-import { type App, ButtonComponent, ExtraButtonComponent, ItemView, Modal, Notice, TFile, TFolder, type WorkspaceLeaf } from "obsidian";
+import { type App, ButtonComponent, ExtraButtonComponent, ItemView, Modal, TFile, TFolder, type WorkspaceLeaf } from "obsidian";
 import type PiecemealGitPlugin from "../main.ts";
 import { ago, headline } from "./words.ts";
 
@@ -191,7 +191,7 @@ export class Report {
     if (copies.length > 0) {
       el.createEl("h4", { text: `Changed on both sides (${copies.length})` });
       el.createEl("p", {
-        text: "Two devices changed these files. The version of the repository took the name, and the one of the device that synced later is beside it as a copy. Look at the two, then keep one.",
+        text: "Two devices changed these files. The version of the repository took the name, and the one of the device that synced later is beside it as a copy. Compare the two, then keep one. To keep some of each, open the file and put in by hand what you want of the copy, then keep the repository's.",
         cls: "piecemeal-git-note",
       });
       for (const path of copies.slice(0, 200)) {
@@ -223,23 +223,18 @@ export class Report {
         mine.createSpan({ text: "The copy: ", cls: "piecemeal-git-label" });
         this.path(mine, copy.path);
         const choice = box.createDiv({ cls: "piecemeal-git-buttons" });
+        // What the two differ in comes first: it is what a choice between them is made by
+        new ButtonComponent(choice)
+          .setButtonText("Compare")
+          .setCta()
+          .onClick(() => {
+            plugin.openCopyDiff(copy, original);
+          });
         new ButtonComponent(choice).setButtonText("Keep the repository's").onClick(async () => {
-          await this.app.fileManager.trashFile(copy);
-          plugin.redraw();
+          await plugin.dropCopy(copy);
         });
         new ButtonComponent(choice).setButtonText("Take the copy").onClick(async () => {
-          const data = await this.app.vault.readBinary(copy);
-          const mineNow = this.app.vault.getAbstractFileByPath(original);
-          if (mineNow instanceof TFile) {
-            await this.app.vault.modifyBinary(mineNow, data);
-          } else if (mineNow === null) {
-            await this.app.vault.createBinary(original, data);
-          } else {
-            new Notice(`${original} is a folder now. The copy stays.`);
-            return;
-          }
-          await this.app.fileManager.trashFile(copy);
-          plugin.redraw();
+          await plugin.takeCopy(copy, original);
         });
       }
       if (copies.length > 200) {
