@@ -252,6 +252,15 @@
   flex: none;
 }
 
+/* Three buttons are more than the width of a phone has room for: they go into a second row. */
+.piecemeal-git-diff-foot .piecemeal-git-buttons {
+  flex-wrap: wrap;
+}
+
+.is-mobile .piecemeal-git-diff-foot .piecemeal-git-buttons button {
+  flex: 1 1 auto;
+}
+
 /* Where a person says for each change which version to keep: the buttons of a change, and what the choice leaves out. */
 .piecemeal-git-diff-pick {
   display: flex;
@@ -275,8 +284,16 @@
   color: var(--text-on-accent);
 }
 
+/* Here red and green do not say what was taken away and added, but what a choice leaves out and keeps:
+   the lines that are kept are green, whichever side they are of, and the others are struck through. */
+.piecemeal-git-diff-choosing .piecemeal-git-diff-change .piecemeal-git-diff-removed,
+.piecemeal-git-diff-choosing .piecemeal-git-diff-change .piecemeal-git-diff-added {
+  background-color: rgba(var(--color-green-rgb), 0.15);
+}
+
 .piecemeal-git-diff-choosing .piecemeal-git-diff-change[data-choice="0"] .piecemeal-git-diff-added,
 .piecemeal-git-diff-choosing .piecemeal-git-diff-change[data-choice="1"] .piecemeal-git-diff-removed {
+  background-color: transparent;
   opacity: 0.45;
   text-decoration: line-through;
 }

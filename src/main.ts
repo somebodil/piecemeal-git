@@ -563,19 +563,27 @@ export default class PiecemealGitPlugin extends Plugin {
     new DiffModal(this.app, {
       title: original,
       what: "The version of the repository, and the copy beside it.",
-      legend:
-        "− is a line that only the repository has, + one that only the copy has. Each change keeps the lines of the repository unless you choose otherwise there. What you save takes the place of the file, and the copy goes.",
+      legend: "− is a line of the repository, + one of the copy. For each change, what is green is kept. Saving puts that into the file, and the copy goes.",
       waiting: "Reading the two…",
       beforeSize: theirs instanceof TFile ? theirs.stat.size : null,
       afterSize: copy.stat.size,
       before: async () => (theirs instanceof TFile ? new Uint8Array(await this.app.vault.readBinary(theirs)) : nothing),
       after: async () => new Uint8Array(await this.app.vault.readBinary(copy)),
+      // The dialog closes when one of these is done, so each says what it did
       actions: [
-        { text: "Keep the repository's", run: () => this.dropCopy(copy) },
+        {
+          text: "Keep the repository's",
+          run: async () => {
+            await this.dropCopy(copy);
+            new Notice(`${original} is as the repository has it. The copy is gone.`);
+          },
+        },
         {
           text: "Take the copy",
           run: async () => {
-            await this.takeCopy(copy, original);
+            if (await this.takeCopy(copy, original)) {
+              new Notice(`${original} holds what the copy held. The next sync sends it.`);
+            }
           },
         },
       ],
@@ -583,7 +591,9 @@ export default class PiecemealGitPlugin extends Plugin {
         before: "Repository's",
         after: "The copy's",
         save: async (text) => {
-          await this.takeCopy(copy, original, new TextEncoder().encode(text).buffer);
+          if (await this.takeCopy(copy, original, new TextEncoder().encode(text).buffer)) {
+            new Notice(`${original} holds what you chose, and the copy is gone. The next sync sends it.`);
+          }
         },
       },
     }).open();
