@@ -4,10 +4,11 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { nodeHttp } from "../../tests/node.ts";
 import { TestServer } from "../../tests/server.ts";
-import { encode } from "./bytes.ts";
+import { concat, encode } from "./bytes.ts";
+import { FLUSH, pkt } from "./pktline.ts";
 import { objectId, parseCommit, parseTree, serializeCommit, serializeTree, signature } from "./objects.ts";
 import { parsePack, writePack } from "./pack.ts";
-import { capabilities, fetchPack, lsRefs, objectSizes, push, RejectedError, remoteOf, ZERO_OID } from "./protocol.ts";
+import { capabilities, fetchPack, lsRefs, objectSizes, push, pushReport, RejectedError, remoteOf, ZERO_OID } from "./protocol.ts";
 
 describe("the git protocol against a real server", () => {
   const server = new TestServer();
@@ -98,12 +99,38 @@ describe("the git protocol against a real server", () => {
       push(nodeHttp, { url }, { ref: "refs/heads/main", oldOid: tip, newOid, pack }),
       RejectedError,
     );
+    // What the server has to say about it comes with what it reports
+    await assert.rejects(push(nodeHttp, { url }, { ref: "refs/heads/main", oldOid: tip, newOid, pack }), (error: Error) => {
+      assert.match(error.message, /^push: the server keeps the branch as it is \(.+\)\. The server says: .*cannot lock ref 'refs\/heads\/main'/);
+      return true;
+    });
     await assert.rejects(
       push(nodeHttp, { url }, { ref: "refs/heads/other", oldOid: tip, newOid, pack }),
       RejectedError,
     );
     await push(nodeHttp, { url }, { ref: "refs/heads/other", oldOid: ZERO_OID, newOid, pack });
     assert.equal(server.git("one.git", "rev-parse", "other"), newOid);
+  });
+
+  it("takes the answer to a push apart, with and without what the server says beside it", () => {
+    const line = (text: string): Uint8Array => pkt(text);
+    const band = (n: number, data: Uint8Array | string): Uint8Array => pkt(concat([new Uint8Array([n]), typeof data === "string" ? encode(data) : data]));
+    // A server that sends the report alone
+    const plain = concat([line("unpack ok\n"), line("ng refs/heads/main failed\n"), FLUSH]);
+    assert.deepEqual(pushReport(plain), { report: plain, said: "" });
+    // Side by side: the report in band 1, cut where the server likes, and what it says in band 2
+    const report = concat([line("unpack ok\n"), line("ng refs/heads/main failed\n"), FLUSH]);
+    const both = concat([
+      band(2, "error: GH013: Repository rule violations found for refs/heads/main.\n"),
+      band(1, report.subarray(0, 9)),
+      band(2, "\rReview all repository rules at the page of the repository\n\n"),
+      band(1, report.subarray(9)),
+      FLUSH,
+    ]);
+    const read = pushReport(both);
+    assert.deepEqual(read.report, report);
+    assert.equal(read.said, "error: GH013: Repository rule violations found for refs/heads/main. Review all repository rules at the page of the repository");
+    assert.deepEqual(pushReport(new Uint8Array(0)), { report: new Uint8Array(0), said: "" });
   });
 
   it("reads what the server can do, and the sizes of objects where it tells them", async () => {

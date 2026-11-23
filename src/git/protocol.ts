@@ -302,7 +302,9 @@ export class RejectedError extends RemoteError {}
 
 /** Sends a pack and moves the branch to its commit. */
 export async function push(http: Http, remote: Remote, options: PushOptions): Promise<void> {
-  const command = `${options.oldOid} ${options.newOid} ${options.ref}\0 report-status ${AGENT}\n`;
+  // With side-band-64k the server sends what it has to say to a person beside its report. Without
+  // it a push that is turned away comes back with a word like "failed", and the reason stays there.
+  const command = `${options.oldOid} ${options.newOid} ${options.ref}\0 report-status side-band-64k ${AGENT}\n`;
   const response = await http({
     url: `${base(remote)}/git-receive-pack`,
     method: "POST",
@@ -313,9 +315,12 @@ export async function push(http: Http, remote: Remote, options: PushOptions): Pr
     body: concat([pkt(encode(command)), FLUSH, options.pack]),
   });
   check(response, "push", remote);
+  const { report, said } = pushReport(response.body);
+  /** What the server said about it, for a person to read */
+  const reason = said === "" ? "" : `. The server says: ${said}`;
   let unpacked = false;
   let accepted = false;
-  for (const packet of readPkts(response.body)) {
+  for (const packet of readPkts(report)) {
     if (packet.type !== "data") {
       continue;
     }
@@ -324,14 +329,46 @@ export async function push(http: Http, remote: Remote, options: PushOptions): Pr
     if (line === "unpack ok") {
       unpacked = true;
     } else if (line.startsWith("unpack ")) {
-      throw new RemoteError(`push: the server could not read the pack (${line.slice(7)})`);
+      throw new RemoteError(`push: the server could not read the pack (${line.slice(7)})${reason}`);
     } else if (line === `ok ${options.ref}`) {
       accepted = true;
     } else if (line.startsWith(`ng ${options.ref}`)) {
-      throw new RejectedError(`push: the server keeps the branch as it is (${line.slice(4 + options.ref.length)})`);
+      throw new RejectedError(`push: the server keeps the branch as it is (${line.slice(4 + options.ref.length)})${reason}`);
     }
   }
   if (!unpacked || !accepted) {
-    throw new RemoteError("push: the server did not confirm");
+    throw new RemoteError(`push: the server did not confirm${reason}`);
   }
+}
+
+/**
+ * Takes the answer to a push apart: the report on the pack and the branch,
+ * and what the server says to a person beside it. A server that does not
+ * send the two side by side sends the report alone.
+ */
+export function pushReport(body: Uint8Array): { report: Uint8Array; said: string } {
+  const packets = [...readPkts(body)];
+  const first = packets.find((packet) => packet.type === "data");
+  // Side by side, every line starts with the number of its band. A report by itself starts with a letter.
+  if (first === undefined || first.type !== "data" || first.data.length === 0 || first.data[0] > 3) {
+    return { report: body, said: "" };
+  }
+  const report: Uint8Array[] = [];
+  let said = "";
+  for (const packet of packets) {
+    if (packet.type !== "data" || packet.data.length === 0) {
+      continue;
+    }
+    if (packet.data[0] === 1) {
+      report.push(packet.data.subarray(1));
+    } else {
+      // Band 2 is what git prints after "remote:", and band 3 an error that ends the answer
+      said += decode(packet.data.subarray(1));
+    }
+  }
+  const lines = said
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  return { report: concat(report), said: lines.join(" ") };
 }

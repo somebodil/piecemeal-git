@@ -445,6 +445,7 @@ export default class PiecemealGitPlugin extends Plugin {
         mergeText,
         maxFileBytes: maxFileMB * MB,
         batchBytes: BATCH_BYTES,
+        wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
         sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
         largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
         onProgress: (progress) => {

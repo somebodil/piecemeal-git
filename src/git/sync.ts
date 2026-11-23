@@ -84,6 +84,11 @@ export interface SyncOptions {
   confirm?: (plan: Plan) => Promise<boolean>;
   now?: () => Date;
   log?: (message: string) => void;
+  /**
+   * Waits so many milliseconds. Called before the sync starts over after the
+   * remote turned away what it sent. Without it the sync starts over at once.
+   */
+  wait?: (ms: number) => Promise<void>;
 }
 
 /** How far a sync is: what it is at, and how many files of how many are done with. */
@@ -189,6 +194,8 @@ const RACY_MS = 3000;
 
 /** How often a sync starts over because another device moved the branch in the meantime */
 const ATTEMPTS = 3;
+/** How long a sync waits before it starts over the first time. The second time it waits twice as long. */
+const RETRY_WAIT_MS = 1500;
 
 /**
  * How many things the files of the vault are asked at once. On a phone each
@@ -405,7 +412,10 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       if (error instanceof RejectedError && attempt < ATTEMPTS) {
         done.uploaded.push(...result.uploaded);
         done.tooLargeIgnored.push(...result.tooLargeIgnored);
-        (options.log ?? (() => undefined))("the branch moved while the sync ran, looking at it again");
+        (options.log ?? (() => undefined))(`the branch moved while the sync ran, looking at it again (${error.message})`);
+        // Not at once: a server that is still at work on what it was sent a moment ago turns away
+        // what comes right after it, and so it does again if it is asked again right away
+        await options.wait?.(RETRY_WAIT_MS * attempt);
         continue;
       }
       throw error;
