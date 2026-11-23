@@ -7,7 +7,7 @@ import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 import { ConfirmModal } from "./ui/confirm.ts";
 import { conflictCopies, ReportModal } from "./ui/report.ts";
 import { DEFAULTS, type Settings, SettingsTab } from "./ui/settings.ts";
-import { ago, concerns, explain, headline, notes, progressText, worthAsking } from "./ui/words.ts";
+import { ago, concerns, explain, headline, notes, progressText, restart, worthAsking } from "./ui/words.ts";
 
 const MB = 1024 * 1024;
 /** Where the plugin keeps the commits, the folders and what it last agreed on */
@@ -168,12 +168,14 @@ export default class PiecemealGitPlugin extends Plugin {
 
   /** Tells what a sync did. One that left something to look at stays until it is closed, and opens the list. */
   private tell(result: SyncResult, unasked: boolean): void {
-    const calm = [headline(result), ...notes(result)];
+    const again = restart(result, this.app.vault.configDir);
+    const calm = [headline(result), ...notes(result), ...again];
     const toLookAt = concerns(result);
     const taken = result.downloaded.length + result.deletedHere.length + result.merged.length;
     if (toLookAt.length === 0) {
       if (!unasked || taken > 0) {
-        new Notice(calm.join("\n"), 5000);
+        // What asks a person to do something stays until it is closed
+        new Notice(calm.join("\n"), again.length > 0 ? 0 : 5000);
       }
       return;
     }
@@ -191,6 +193,30 @@ export default class PiecemealGitPlugin extends Plugin {
         });
       }),
     );
+  }
+
+  /**
+   * The list of the plugins that are on is a file of the vault like any other,
+   * and a sync takes the one of the repository. One that came from a device
+   * without this plugin would turn it off when Obsidian starts again, and with
+   * it the sync. So this plugin is put back on the list, and the next sync
+   * sends the list with it.
+   */
+  private async stayOn(result: SyncResult): Promise<void> {
+    const path = `${this.app.vault.configDir}/community-plugins.json`;
+    if (!result.downloaded.includes(path) && !result.merged.includes(path)) {
+      return;
+    }
+    try {
+      const { adapter } = this.app.vault;
+      const on: unknown = JSON.parse(await adapter.read(path));
+      if (Array.isArray(on) && !on.includes(this.manifest.id)) {
+        // Written as Obsidian writes it, so that the file does not change when Obsidian writes it again
+        await adapter.write(path, JSON.stringify([...(on as unknown[]), this.manifest.id], null, 2));
+      }
+    } catch (error) {
+      console.error("Piecemeal Git: the list of plugins could not be read", error);
+    }
   }
 
   /**
@@ -249,7 +275,7 @@ export default class PiecemealGitPlugin extends Plugin {
       // What stays on the device: the settings of this plugin, the trash of Obsidian, and the files in
       // which Obsidian keeps what is open on this device, which change whenever a note is opened
       const own = new Set([`${configDir}/plugins/${this.manifest.id}/data.json`, `${configDir}/workspace.json`, `${configDir}/workspace-mobile.json`]);
-      const from = device !== "" ? device : Platform.isMobile ? "a phone" : "a computer";
+      const from = device !== "" ? device : Platform.isTablet ? "a tablet" : Platform.isMobile ? "a phone" : "a computer";
       const result = await sync({
         fs,
         http: obsidianHttp,
@@ -297,8 +323,9 @@ export default class PiecemealGitPlugin extends Plugin {
       });
       this.rewritten += fs.rewritten;
       this.lastResult = result;
+      await this.stayOn(result);
       const toLookAt = concerns(result);
-      this.last = { at: Date.now(), ok: true, text: [headline(result), ...notes(result), ...toLookAt].join(" "), attention: toLookAt.length > 0 };
+      this.last = { at: Date.now(), ok: true, text: [headline(result), ...notes(result), ...restart(result, configDir), ...toLookAt].join(" "), attention: toLookAt.length > 0 };
       this.failedUnasked = false;
       waiting?.hide();
       this.tell(result, unasked);

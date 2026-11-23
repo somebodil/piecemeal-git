@@ -48,7 +48,25 @@ export function headline(result: SyncResult): string {
 
 /** What a sync did that is good to know, and nothing has to be done about. */
 export function notes(result: SyncResult): string[] {
-  return result.merged.length > 0 ? [`Changed on both sides, and put together: ${list(result.merged)}.`] : [];
+  const lines: string[] = [];
+  if (result.merged.length > 0) {
+    lines.push(`Changed on both sides, and put together: ${list(result.merged)}.`);
+  }
+  if (result.replaced.length > 0) {
+    lines.push(`Not as the repository has ${result.replaced.length === 1 ? "it" : "them"}, and replaced by its version: ${list(result.replaced)}.`);
+  }
+  return lines;
+}
+
+/**
+ * What to say after a sync that took settings of Obsidian or of a plugin, or
+ * the code of a plugin: Obsidian read them when it started, and goes on with
+ * what it read.
+ * @param configDir the folder in which Obsidian keeps its settings
+ */
+export function restart(result: SyncResult, configDir: string): string[] {
+  const settings = [...result.downloaded, ...result.merged, ...result.deletedHere].some((path) => path.startsWith(`${configDir}/`));
+  return settings ? ["Settings of Obsidian came with it. Close Obsidian and open it again, so that it reads them."] : [];
 }
 
 /** What a sync left for a person to look at. */
@@ -56,7 +74,12 @@ export function concerns(result: SyncResult): string[] {
   const lines: string[] = [];
   if (result.conflicts.length > 0) {
     lines.push(
-      `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. Your version stays, the other one is kept beside it as a copy.`,
+      `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. The version of the repository has the name now, and yours is kept beside it as a copy.`,
+    );
+  }
+  if (result.clashes.length > 0) {
+    lines.push(
+      `A file on one side and a folder on the other: ${list(result.clashes.map((c) => c.path))}. What is here keeps the name, and what the repository has is beside it.`,
     );
   }
   if (result.tooLargeIgnored.length > 0) {
@@ -115,8 +138,8 @@ export function httpsAddress(given: string): string {
 
 /** True for a sync that a person should see before it does anything. */
 export function worthAsking(plan: Plan): boolean {
-  // A vault with notes meets a repository with files for the first time
-  if (plan.first && plan.take > 0 && plan.send > 0) {
+  // A vault with notes meets a repository with files for the first time, or holds files that give way to it
+  if (plan.first && ((plan.take > 0 && plan.send > 0) || plan.replace.length > 0)) {
     return true;
   }
   // A good part of what was synced is about to go

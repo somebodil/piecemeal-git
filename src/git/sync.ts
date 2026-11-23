@@ -59,7 +59,8 @@ export interface SyncOptions {
   composeNames?: boolean;
   /**
    * False to never put together what both sides made of a text. The version
-   * of the remote is then always kept beside the one of the vault, as a copy.
+   * of the remote then always takes the name, and the one of the vault is
+   * kept beside it, as a copy.
    */
   mergeText?: boolean;
   /** A file larger than this is neither sent nor asked for in one piece */
@@ -104,7 +105,13 @@ export interface Plan {
   /** Files that the sync removes from the vault, and from the remote */
   removeHere: string[];
   removeThere: string[];
-  /** Files that both sides changed: put together where they are texts and it works out, else kept as two */
+  /** Files that differ on the two sides at a first sync. The version of the remote takes their place. */
+  replace: string[];
+  /**
+   * Files that both sides changed. They are put together where they are
+   * texts and it works out. Else the version of the remote takes the name,
+   * and the one of the vault is kept beside it as a copy.
+   */
   bothChanged: string[];
 }
 
@@ -124,8 +131,15 @@ export interface SyncResult {
   deletedThere: string[];
   /** Texts that both sides changed in different places. The vault and the remote now hold both changes. */
   merged: string[];
-  /** Files that both sides changed: this side stays, the other side is kept as a copy */
+  /** Files that both sides changed: the version of the remote has the name, and the one of this side is at `copy` */
   conflicts: { path: string; copy: string }[];
+  /** Files that differed at the first sync with the remote. The version of the remote took their place. */
+  replaced: string[];
+  /**
+   * Names that are a file on one side and a folder on the other. What the
+   * vault holds keeps the name, and what the remote has is at `copy`.
+   */
+  clashes: { path: string; copy: string }[];
   /** New files that were too large to send. They were written into `.gitignore`. */
   tooLargeIgnored: string[];
   /** Files of the remote that were changed here and are now too large to send. The remote keeps its version. */
@@ -160,6 +174,11 @@ interface State {
    * change could leave their size and time as they are. They are read again.
    */
   racy?: Record<string, true>;
+  /**
+   * True while the first sync with the remote has not come to its end. One
+   * that was cut off goes on as a first sync, and not as one after it.
+   */
+  joining?: true;
 }
 
 /**
@@ -265,12 +284,29 @@ async function buildTrees(
   return { root: await build(top), trees };
 }
 
-/** A name next to `path` for the other side of a conflict. */
-function conflictPath(path: string, when: Date, taken: (path: string) => boolean): string {
+/** The name of `path` up to its ending, and the ending. */
+function stemOf(path: string): { stem: string; ext: string } {
   const slash = path.lastIndexOf("/");
   const dot = path.lastIndexOf(".");
-  const stem = dot > slash + 1 ? path.slice(0, dot) : path;
-  const ext = dot > slash + 1 ? path.slice(dot) : "";
+  return dot > slash + 1 ? { stem: path.slice(0, dot), ext: path.slice(dot) } : { stem: path, ext: "" };
+}
+
+/** True if `candidate` is a name that `conflictPath` gives for `path`. */
+function isCopyOf(candidate: string, path: string): boolean {
+  const { stem, ext } = stemOf(path);
+  const start = `${stem} (conflict `;
+  const end = `)${ext}`;
+  return (
+    candidate.length > start.length + end.length &&
+    candidate.startsWith(start) &&
+    candidate.endsWith(end) &&
+    /^\d{4}-\d{2}-\d{2} \d{4}(?: \d+)?$/.test(candidate.slice(start.length, candidate.length - end.length))
+  );
+}
+
+/** A name next to `path` for the other side of a conflict. */
+function conflictPath(path: string, when: Date, taken: (path: string) => boolean): string {
+  const { stem, ext } = stemOf(path);
   const pad = (n: number): string => String(n).padStart(2, "0");
   const stamp = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}${pad(when.getMinutes())}`;
   let candidate = `${stem} (conflict ${stamp})${ext}`;
@@ -286,9 +322,12 @@ function conflictPath(path: string, when: Date, taken: (path: string) => boolean
  * The device keeps no commits of its own. Every sync compares three things
  * for each path: what both sides last agreed on, what the vault holds now,
  * and what the remote holds now. What changed on one side goes to the other.
- * What changed on both stays as it is here, and the other version is kept
- * beside it under another name. The changes of the device then become one
- * commit on top of the remote, so the history of the branch stays a line.
+ * Where both changed a file and the two cannot be put together, the remote
+ * is right: its version takes the name, and the one of the vault is kept
+ * beside it under another name. At the first sync with a remote, a file that
+ * differs is replaced by the one of the remote. The changes of the device
+ * then become one commit on top of the remote, so the history of the branch
+ * stays a line.
  */
 export async function sync(options: SyncOptions): Promise<SyncResult> {
   /** What an attempt did before the remote refused the rest */
@@ -336,6 +375,8 @@ function emptyResult(): SyncResult {
     deletedThere: [],
     merged: [],
     conflicts: [],
+    replaced: [],
+    clashes: [],
     tooLargeIgnored: [],
     tooLargeChanged: [],
     tooLargeThere: [],
@@ -438,13 +479,17 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   // --- What was agreed on last time -----------------------------------------
   let state: State = { version: 1, url: remote.url, branch: "", commit: null, tree: {}, stat: {}, absent: {} };
   const saved = await fs.read(statePath);
+  /** True if there was a sync before, and what it agreed on is lost */
+  let lost = false;
   if (saved !== null) {
     let parsed: State | null = null;
     try {
       parsed = JSON.parse(decode(saved)) as State;
     } catch {
-      // Cut off, as after an app that was stopped while it wrote. As with no file at all, the vault
-      // joins the remote anew: nothing is removed on either side, and what differs gets its copy.
+      // Cut off, as after an app that was stopped while it wrote. The vault joins the remote anew:
+      // nothing is removed on either side. A file that differs may hold what this device changed
+      // since, so the version of the vault is kept beside the one of the remote, as a copy.
+      lost = true;
       log("what was agreed on last time cannot be read: the vault joins the remote anew");
     }
     if (parsed !== null && typeof parsed === "object" && typeof parsed.tree === "object") {
@@ -486,6 +531,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
   }
   const base = new Map(Object.entries(state.tree));
+  /**
+   * True if this vault and this remote have not been synced to the end before.
+   * What the vault holds then was not made from what the remote holds, so a
+   * file that differs gives way to the one of the remote.
+   */
+  const first = !lost && (saved === null || state.commit === null || state.joining === true);
 
   const fetchCommit = async (oid: string, have: string | null): Promise<void> => {
     const fetched = await fetchPack(http, remote, {
@@ -552,6 +603,41 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   // --- What the vault holds now ---------------------------------------------
   noteSpelling(base.keys());
   noteSpelling(there.keys());
+  // A `.gitignore` of the remote that this sync is about to put into the vault
+  // counts in this sync already, as it would after a pull with git. Without
+  // that, a vault that meets a repository for the first time would send what
+  // the repository leaves out on purpose.
+  /** The text of such a file, by its path */
+  const rulesToCome = new Map<string, string>();
+  {
+    const wants = new Map<string, string[]>();
+    for (const [path, t] of there) {
+      if ((path !== ".gitignore" && !path.endsWith("/.gitignore")) || !isFile(t) || excluded(path, false)) {
+        continue;
+      }
+      const b = base.get(path);
+      if (!first && same(t, b)) {
+        // The remote left it as it was: the one of the vault counts, changed or not
+        continue;
+      }
+      const data = await fs.read(path);
+      const oid = data === null ? null : await objectId({ type: "blob", data });
+      // The same on both sides, or changed here as well: what comes out of the two is not known yet
+      if (oid === t.oid || (!first && oid !== null && oid !== b?.oid)) {
+        continue;
+      }
+      wants.set(t.oid, [...(wants.get(t.oid) ?? []), path]);
+    }
+    if (wants.size > 0) {
+      const fetched = await fetchPack(http, remote, { wants: [...wants.keys()] });
+      for (const object of await parsePack(fetched.pack)) {
+        for (const path of wants.get(object.oid) ?? []) {
+          rulesToCome.set(path, decode(object.data));
+        }
+      }
+    }
+  }
+
   const here = new Map<string, Entry>();
   const stats = new Map<string, FileStat>();
   /**
@@ -568,8 +654,10 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
    * size to the byte. Such a file is too large to read and see what it holds.
    */
   const moved = new Map<string, Entry>();
+  /** True if the paths of files that are too large were added to the `.gitignore` of the remote, and not to one of the vault */
+  let addedToTheirs = false;
   {
-    let gitignore = decode((await fs.read(".gitignore")) ?? new Uint8Array(0));
+    let gitignore = rulesToCome.get(".gitignore") ?? decode((await fs.read(".gitignore")) ?? new Uint8Array(0));
     const found: string[] = [];
     /** The `.gitignore` files that have a say in a folder, the one of the vault first */
     type Level = { dir: string; decide: Verdict };
@@ -588,10 +676,15 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     const walk = async (dir: string, above: Level[]): Promise<void> => {
       const listed = await listing(dir);
       let levels = above;
-      if (dir !== "" && listed.files.has(".gitignore")) {
-        const own = await fs.read(join(dir, ".gitignore"));
-        if (own !== null) {
-          levels = [...above, { dir, decide: verdict(decode(own)) }];
+      if (dir !== "") {
+        const at = join(dir, ".gitignore");
+        let rules = rulesToCome.get(at);
+        if (rules === undefined && listed.files.has(".gitignore")) {
+          const own = await fs.read(at);
+          rules = own === null ? undefined : decode(own);
+        }
+        if (rules !== undefined) {
+          levels = [...above, { dir, decide: verdict(rules) }];
         }
       }
       for (const name of listed.files) {
@@ -657,6 +750,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       gitignore = addToBlock(gitignore, tooLarge);
       await fs.write(".gitignore", encode(gitignore));
       noteWritten(".gitignore");
+      addedToTheirs = rulesToCome.has(".gitignore");
       result.tooLargeIgnored = tooLarge;
       if (!seen.has(".gitignore")) {
         found.push(".gitignore");
@@ -750,12 +844,21 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   const paths = new Set([...base.keys(), ...here.keys(), ...there.keys()]);
   /** Files that both sides changed, and that may be texts that can be put together */
   const bothChanged: { path: string; b: Entry; h: Entry; t: Entry }[] = [];
-  /** Keeps the version of the vault under the name, and puts the one of the remote beside it. */
-  const keepBoth = (path: string, theirs: Entry): void => {
-    const copy = conflictPath(path, now, (p) => paths.has(p) || target.has(p));
-    target.set(copy, theirs);
-    downloads.push({ path: copy, entry: theirs, from: path });
-    uploads.push(path);
+  /** Files that differ at a first sync. The version of the remote takes their place. */
+  const replaced = new Set<string>();
+  /** Files of the vault that give way to the version of the remote, and go beside it under the name `copy` */
+  const aside: { path: string; copy: string; h: Entry }[] = [];
+  const copyNames = new Set<string>();
+  /** Gives the name to the version of the remote, and keeps the one of the vault beside it. */
+  const takeTheirs = (path: string, h: Entry, t: Entry): void => {
+    // A sync that was cut off may have made the copy of this very version already
+    let copy = [...here.keys()].find((other) => isCopyOf(other, path) && here.get(other)!.oid === h.oid);
+    if (copy === undefined) {
+      copy = conflictPath(path, now, (p) => paths.has(p) || target.has(p) || copyNames.has(p));
+      copyNames.add(copy);
+      aside.push({ path, copy, h });
+    }
+    downloads.push({ path, entry: t });
     result.conflicts.push({ path, copy });
   };
   /** True if a file is no longer what the scan saw. Such a file is left for the next sync. */
@@ -770,6 +873,11 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   for (const path of paths) {
     if (excluded(path, false)) {
       // Never synced: whatever the remote has under this name stays there, and is not taken
+      continue;
+    }
+    if (path === ".gitignore" && addedToTheirs) {
+      // What the vault holds of it is the one of the remote, with the files that are too large added
+      uploads.push(path);
       continue;
     }
     const b = base.get(path);
@@ -816,21 +924,28 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     } else if (t === undefined) {
       // Changed here, removed there: the change wins
       uploads.push(path);
+    } else if (!inVault(t)) {
+      // A repository inside the repository, where the vault has a file: neither gives way
+    } else if (b === undefined && first) {
+      // Never synced with this remote: the remote is right
+      downloads.push({ path, entry: t });
+      replaced.add(path);
     } else if (options.mergeText !== false && b !== undefined && isFile(b) && isFile(h) && isFile(t)) {
       bothChanged.push({ path, b, h, t });
     } else {
-      keepBoth(path, t);
+      takeTheirs(path, h, t);
     }
   }
 
   if (options.confirm !== undefined) {
     const plan: Plan = {
-      first: saved === null || state.commit === null,
+      first: first || lost,
       tracked: base.size,
       take: downloads.length,
       send: uploads.length,
       removeHere: removeHere.filter((path) => !absent.has(path)),
       removeThere: [...result.deletedThere],
+      replace: [...replaced],
       bothChanged: [...bothChanged.map((item) => item.path), ...result.conflicts.map((item) => item.path)],
     };
     if (!(await options.confirm(plan))) {
@@ -842,13 +957,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
   // As git does it: what the two sides changed in different places of a text
   // is put together, line by line. The device keeps no contents of what was
   // agreed on, so the remote is asked for the text as it was. Where that does
-  // not work out, the version of the remote goes beside the one of the vault.
+  // not work out, the version of the remote takes the name.
   for (const { path, b, h, t } of bothChanged) {
     const stat = stats.get(path);
     const ours = stat === undefined || stat.size > options.batchBytes ? null : await fs.read(path);
     if (ours === null || !isText(ours)) {
       // Too large for one request, or not a text
-      keepBoth(path, t);
+      takeTheirs(path, h, t);
       continue;
     }
     if ((await objectId({ type: "blob", data: ours })) !== h.oid) {
@@ -872,7 +987,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       }
     }
     if (both === null) {
-      keepBoth(path, t);
+      takeTheirs(path, h, t);
       continue;
     }
     const entry: Entry = { oid: await objectId({ type: "blob", data: both }), mode: h.mode !== b.mode ? h.mode : t.mode };
@@ -904,10 +1019,44 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     result.merged.push(path);
   }
 
+  // --- A file that gives way to the version of the remote --------------------
+  // What the vault holds of it is written beside it first, under another
+  // name, and goes to the remote as a new file. Only then does the version of
+  // the remote take the name, so that what this device made is never lost.
+  for (const { path, copy, h } of aside) {
+    const link = await linkAt(path);
+    const data = link ?? (await fs.read(path));
+    let stat: FileStat | null = null;
+    if (data !== null && (await objectId({ type: "blob", data })) === h.oid) {
+      if (link !== null && fs.writeLink !== undefined) {
+        await fs.writeLink(copy, decode(link));
+      } else {
+        await fs.write(copy, data);
+      }
+      stat = await fs.stat(copy);
+    }
+    if (stat === null) {
+      // Changed since it was looked at, or gone: the file stays as it is, for the next sync
+      const planned = downloads.findIndex((item) => item.path === path);
+      if (planned >= 0) {
+        downloads.splice(planned, 1);
+      }
+      result.conflicts = result.conflicts.filter((item) => item.path !== path);
+      result.busy.push(path);
+      continue;
+    }
+    noteWritten(copy);
+    present.add(copy);
+    here.set(copy, h);
+    stats.set(copy, stat);
+    seenAs.set(copy, h.oid);
+    uploads.push(copy);
+  }
+
   // --- A name that is a file on one side and a folder on the other ----------
   // Neither a vault nor a commit can hold both. What the vault holds keeps its
-  // name, and what the remote has goes beside it under another name, as with
-  // a file that both sides changed.
+  // name, and what the remote has goes beside it under another name: a folder
+  // of the vault with all that it holds is not moved out of the way.
   {
     const removing = new Set(removeHere);
     const isHere = (path: string): boolean => present.has(path) && !removing.has(path);
@@ -944,7 +1093,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           }
         }
       }
-      result.conflicts.push({ path: from, copy: to });
+      result.clashes.push({ path: from, copy: to });
     };
     for (const file of [...names].filter((name) => folders.has(name)).sort()) {
       if (isHere(file)) {
@@ -962,6 +1111,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
     }
   }
 
+  /** True once the sync has done all that it set out to do */
+  let ended = false;
   const saveState = async (): Promise<void> => {
     const next: State = {
       version: 1,
@@ -991,6 +1142,9 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         }
       }
     }
+    if (first && !ended) {
+      next.joining = true;
+    }
     await fs.write(statePath, encode(JSON.stringify(next)));
   };
 
@@ -1019,7 +1173,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         groups.push(group);
       }
     }
-    // Removals and the copies of conflicts need a commit even if no content is sent
+    // Removals and files that only change their name need a commit even if no content is sent
     if (groups.length === 0 && (target.size !== there.size || [...target].some(([path, entry]) => !same(entry, there.get(path))))) {
       groups.push([]);
     }
@@ -1221,6 +1375,23 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
         settle(path, entry, true);
         return true;
       };
+      /**
+       * At a first sync, what the vault holds under the name of a file of the
+       * remote makes room for it. It goes where the app keeps what a person
+       * deleted, where the app has such a place for it.
+       */
+      const makeRoom = async (path: string): Promise<void> => {
+        if (replaced.has(path) && fs.discard !== undefined && (await fs.stat(path)) !== null) {
+          await fs.discard(path);
+        }
+      };
+      /** Notes that a file of the remote is in the vault now. */
+      const took = (path: string): void => {
+        result.downloaded.push(path);
+        if (replaced.has(path)) {
+          result.replaced.push(path);
+        }
+      };
       let taken = 0;
       const tookOne = (): void => progress({ step: "taking", done: ++taken, total: downloads.length });
       progress({ step: "taking", done: 0, total: downloads.length });
@@ -1244,6 +1415,9 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
           const { largeBlob } = options;
           const busyBefore = result.busy.length;
           tookOne();
+          if (largeBlob !== undefined) {
+            await makeRoom(path);
+          }
           if (largeBlob !== undefined && (await put(path, entry, () => largeBlob(file, path)))) {
             const stat = await fs.stat(path);
             if (stat !== null) {
@@ -1251,7 +1425,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
               seenAs.set(path, entry.oid);
             }
             settle(path, entry, false);
-            result.downloaded.push(path);
+            took(path);
           } else if (result.busy.length === busyBefore) {
             settle(path, entry, true, size);
             result.tooLargeThere.push(path);
@@ -1307,6 +1481,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
             if (await clashes(path, entry)) {
               continue;
             }
+            await makeRoom(path);
             const written = await put(path, entry, async () => {
               if (entry.mode === MODE_LINK && fs.writeLink !== undefined) {
                 await fs.writeLink(path, decode(data));
@@ -1325,7 +1500,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
               seenAs.set(path, entry.oid);
             }
             settle(path, entry, false);
-            result.downloaded.push(path);
+            took(path);
           }
         }
         batch = [];
@@ -1341,6 +1516,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       }
       await flush();
     }
+    ended = true;
   } finally {
     await saveState();
   }

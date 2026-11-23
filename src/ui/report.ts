@@ -1,4 +1,4 @@
-import { type App, ButtonComponent, Modal, Notice, TFile } from "obsidian";
+import { type App, ButtonComponent, Modal, Notice, TFile, TFolder } from "obsidian";
 import type PiecemealGitPlugin from "../main.ts";
 import { ago, headline } from "./words.ts";
 
@@ -6,7 +6,10 @@ import { ago, headline } from "./words.ts";
 const COPY = / \(conflict \d{4}-\d{2}-\d{2} \d{4}(?: \d+)?\)(?=(?:\.[^./]*)?$)/;
 
 interface Copy {
-  /** The version of the other side */
+  /**
+   * The version of this device of a file that both sides changed. Beside a
+   * folder it is a file of the repository that has the name of the folder.
+   */
   copy: TFile;
   /** The path of the file that it is a copy beside */
   original: string;
@@ -109,23 +112,38 @@ export class ReportModal extends Modal {
     if (copies.length > 0) {
       contentEl.createEl("h4", { text: `Changed on both sides (${copies.length})` });
       contentEl.createEl("p", {
-        text: "Both this device and another one changed these files. Yours kept the name, and the other version is beside it as a copy. Look at the two, then keep one.",
+        text: "Both this device and another one changed these files. The version of the repository took the name, and yours is beside it as a copy. Look at the two, then keep one.",
         cls: "piecemeal-git-note",
       });
       for (const { copy, original } of copies) {
         const box = contentEl.createDiv({ cls: "piecemeal-git-copy" });
+        if (this.app.vault.getAbstractFileByPath(original) instanceof TFolder) {
+          // A folder here and a file in the repository: the folder kept the name
+          const folder = box.createDiv();
+          folder.createSpan({ text: "A folder here: ", cls: "piecemeal-git-label" });
+          this.path(folder, original);
+          const file = box.createDiv();
+          file.createSpan({ text: "A file of the repository: ", cls: "piecemeal-git-label" });
+          this.path(file, copy.path);
+          const only = box.createDiv({ cls: "piecemeal-git-buttons" });
+          new ButtonComponent(only).setButtonText("Remove the file").onClick(async () => {
+            await this.app.fileManager.trashFile(copy);
+            this.render();
+          });
+          continue;
+        }
+        const theirs = box.createDiv();
+        theirs.createSpan({ text: "The repository's: ", cls: "piecemeal-git-label" });
+        this.path(theirs, original);
         const mine = box.createDiv();
         mine.createSpan({ text: "Yours: ", cls: "piecemeal-git-label" });
-        this.path(mine, original);
-        const other = box.createDiv();
-        other.createSpan({ text: "The other: ", cls: "piecemeal-git-label" });
-        this.path(other, copy.path);
+        this.path(mine, copy.path);
         const choice = box.createDiv({ cls: "piecemeal-git-buttons" });
-        new ButtonComponent(choice).setButtonText("Keep mine").onClick(async () => {
+        new ButtonComponent(choice).setButtonText("Keep the repository's").onClick(async () => {
           await this.app.fileManager.trashFile(copy);
           this.render();
         });
-        new ButtonComponent(choice).setButtonText("Take the other").onClick(async () => {
+        new ButtonComponent(choice).setButtonText("Take mine back").onClick(async () => {
           const data = await this.app.vault.readBinary(copy);
           const mineNow = this.app.vault.getAbstractFileByPath(original);
           if (mineNow instanceof TFile) {
@@ -147,6 +165,7 @@ export class ReportModal extends Modal {
       contentEl.createEl("h4", { text: "What the last sync did" });
       const before = contentEl.childElementCount;
       this.section("Taken from the repository", result.downloaded);
+      this.section("Replaced by the version of the repository", result.replaced, "This vault held them otherwise before its first sync. A note that gave way went where Obsidian puts files that you delete.");
       this.section("Sent to the repository", result.uploaded);
       this.section("Put together", result.merged, "Both sides changed different lines of these texts. They hold both changes now.");
       this.section("Removed from this vault", result.deletedHere, "Removed from the repository by another device. They went where Obsidian puts files that you delete.");

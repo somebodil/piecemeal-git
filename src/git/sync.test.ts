@@ -189,7 +189,7 @@ describe("sync", () => {
     assert.deepEqual(w.log(), ["from the computer", "first"]);
   });
 
-  it("merges changes to different files, and keeps both versions of a file that both changed", async () => {
+  it("merges changes to different files, and gives the name of a file that both changed to the version of the remote", async () => {
     const w = setup({ "a.md": "a\n", "b.md": "b\n", "both.md": "start\n" });
     await w.syncPhone();
     w.writePc("a.md", "a from the computer\n");
@@ -202,14 +202,16 @@ describe("sync", () => {
     const copy = "both (conflict 2026-11-22 0915).md";
     assert.deepEqual(result.conflicts, [{ path: "both.md", copy }]);
     assert.equal(w.readPhone("a.md"), "a from the computer\n");
-    assert.equal(w.readPhone("both.md"), "the phone's version\n");
-    assert.equal(w.readPhone(copy), "the computer's version\n");
+    assert.equal(w.readPhone("both.md"), "the computer's version\n");
+    assert.equal(w.readPhone(copy), "the phone's version\n");
+    assert.deepEqual(result.uploaded.sort(), ["b.md", copy]);
+    assert.deepEqual(result.downloaded.sort(), ["a.md", "both.md"]);
     assert.deepEqual(w.log(), ["from the phone", "from the computer", "first"]);
 
     w.pullPc();
     assert.equal(w.readPc("b.md"), "b from the phone\n");
-    assert.equal(w.readPc("both.md"), "the phone's version\n");
-    assert.equal(w.readPc(copy), "the computer's version\n");
+    assert.equal(w.readPc("both.md"), "the computer's version\n");
+    assert.equal(w.readPc(copy), "the phone's version\n");
 
     const again = await w.syncPhone();
     assert.deepEqual([again.downloaded, again.uploaded, again.conflicts], [[], [], []]);
@@ -255,7 +257,7 @@ describe("sync", () => {
     assert.deepEqual([again.merged, again.downloaded, again.uploaded], [[], [], []]);
   });
 
-  it("keeps both versions of what is not a text, and of a text when it is told not to put texts together", async () => {
+  it("keeps the version of the vault as a copy of what is not a text, and of a text when it is told not to put texts together", async () => {
     const image = (byte: number): Buffer => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, byte, 10, 1, 10, 2, 10]);
     const w = setup({ "image.png": image(1), "note.md": "one\ntwo\nthree\nfour\n" });
     await w.syncPhone();
@@ -267,18 +269,55 @@ describe("sync", () => {
     const result = await w.syncPhone({ mergeText: false });
     assert.deepEqual(result.merged, []);
     assert.deepEqual(result.conflicts.map((c) => c.path).sort(), ["image.png", "note.md"]);
-    assert.equal(w.readPhone("note.md"), "one\ntwo\nthree\nFOUR\n");
-    assert.equal(w.readPhone("note (conflict 2026-11-22 0915).md"), "ONE\ntwo\nthree\nfour\n");
-    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image.png")), image(3));
-    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image (conflict 2026-11-22 0915).png")), image(2));
+    assert.equal(w.readPhone("note.md"), "ONE\ntwo\nthree\nfour\n");
+    assert.equal(w.readPhone("note (conflict 2026-11-22 0915).md"), "one\ntwo\nthree\nFOUR\n");
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image.png")), image(2));
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image (conflict 2026-11-22 0915).png")), image(3));
+    w.pullPc();
+    assert.deepEqual(readFileSync(path.join(w.pcDir, "image.png")), image(2));
+    assert.deepEqual(readFileSync(path.join(w.pcDir, "image (conflict 2026-11-22 0915).png")), image(3));
 
     // The same with texts put together: the image still gets its copy
-    w.pullPc();
     w.writePc("image.png", image(4));
     w.pushPc();
     w.writePhone("image.png", image(5));
     const second = await w.syncPhone();
-    assert.deepEqual([second.merged, second.conflicts.map((c) => c.path)], [[], ["image.png"]]);
+    assert.deepEqual([second.merged, second.conflicts], [[], [{ path: "image.png", copy: "image (conflict 2026-11-22 0915 2).png" }]]);
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image.png")), image(4));
+    assert.deepEqual(readFileSync(path.join(w.phoneDir, "image (conflict 2026-11-22 0915 2).png")), image(5));
+  });
+
+  it("makes one copy only of a version that gives way, also when the sync is cut off before the other one came", async () => {
+    const w = setup({ "note.md": "start\n" });
+    await w.syncPhone();
+    w.writePc("note.md", "the computer's\n");
+    w.pushPc();
+    w.writePhone("note.md", "the phone's\n");
+    // The copy goes to the remote, and then the network is gone
+    let sent = false;
+    await assert.rejects(
+      w.syncPhone({
+        http: (request) => {
+          if (sent && request.url.endsWith("/git-upload-pack")) {
+            return Promise.reject(new Error("no network"));
+          }
+          sent = sent || request.url.endsWith("/git-receive-pack");
+          return nodeHttp(request);
+        },
+      }),
+      /no network/,
+    );
+    const copy = "note (conflict 2026-11-22 0915).md";
+    assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the phone's\n", "the phone's\n"]);
+
+    const result = await w.syncPhone({ now: () => new Date(2026, 10, 22, 9, 30) });
+    assert.deepEqual([result.conflicts, result.downloaded, result.uploaded], [[{ path: "note.md", copy }], ["note.md"], []]);
+    assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", copy, "note.md"]);
+    assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's\n", "the phone's\n"]);
+    w.pullPc();
+    assert.deepEqual([w.readPc("note.md"), w.readPc(copy)], ["the computer's\n", "the phone's\n"]);
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded, again.conflicts], [[], [], []]);
   });
 
   it("puts a text together again after a sync that stopped before it sent the result", async () => {
@@ -558,9 +597,12 @@ describe("sync", () => {
     w.writePhone("a.md", "a of the phone\n");
     w.writePhone("c.md", "c\n");
     const result = await w.syncPhone();
-    assert.deepEqual([result.deletedHere, result.deletedThere, result.downloaded], [[], [], ["a (conflict 2026-11-22 0915).md"]]);
-    assert.deepEqual(result.uploaded.sort(), ["a.md", "c.md"]);
-    assert.deepEqual([w.readPhone("a.md"), w.readPhone("b.md")], ["a of the phone\n", "b\n"]);
+    // What the phone changed since may be nowhere else: it is kept, beside the version of the remote
+    const copy = "a (conflict 2026-11-22 0915).md";
+    assert.deepEqual([result.deletedHere, result.deletedThere, result.downloaded, result.replaced], [[], [], ["a.md"], []]);
+    assert.deepEqual(result.conflicts, [{ path: "a.md", copy }]);
+    assert.deepEqual(result.uploaded.sort(), [copy, "c.md"]);
+    assert.deepEqual([w.readPhone("a.md"), w.readPhone(copy), w.readPhone("b.md")], ["a\n", "a of the phone\n", "b\n"]);
     const again = await w.syncPhone();
     assert.deepEqual([again.downloaded, again.uploaded], [[], []]);
   });
@@ -594,10 +636,103 @@ describe("sync", () => {
     w.writePhone("same.md", "same\n");
     w.writePhone("differs.md", "the phone's\n");
     const result = await w.syncPhone();
-    assert.deepEqual(result.downloaded.sort(), ["differs (conflict 2026-11-22 0915).md", "there.md"]);
-    assert.deepEqual(result.uploaded.sort(), ["differs.md", "here.md"]);
+    // A file that differs is as the repository has it afterwards, and nothing of it is sent
+    assert.deepEqual(result.downloaded.sort(), ["differs.md", "there.md"]);
+    assert.deepEqual([result.uploaded, result.replaced, result.conflicts], [["here.md"], ["differs.md"], []]);
+    assert.equal(w.readPhone("differs.md"), "the computer's\n");
+    assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "differs.md", "here.md", "same.md", "there.md"]);
+    assert.deepEqual(w.pathsThere(), ["differs.md", "here.md", "same.md", "there.md"]);
+    w.pullPc();
+    assert.equal(w.readPc("differs.md"), "the computer's\n");
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded, again.replaced], [[], [], []]);
+  });
+
+  it("puts what gives way at a first sync where a person can get it back", async () => {
+    const w = setup({ "differs.md": "the computer's\n", "same.md": "same\n" });
+    w.writePhone("differs.md", "the phone's\n");
+    w.writePhone("same.md", "same\n");
+    const fs = new NodeFs(w.phoneDir) as NodeFs & { discard?: (file: string) => Promise<void> };
+    const discarded: Record<string, string | null> = {};
+    fs.discard = async (file) => {
+      discarded[file] = w.readPhone(file);
+      await fs.remove(file);
+    };
+    const result = await w.syncPhone({ fs });
+    assert.deepEqual([result.replaced, discarded], [["differs.md"], { "differs.md": "the phone's\n" }]);
+    assert.equal(w.readPhone("differs.md"), "the computer's\n");
+  });
+
+  it("goes on as a first sync after a first sync that was cut off", async () => {
+    const w = setup({ "there.md": "there\n", "differs.md": "the computer's\n" });
+    w.writePhone("here.md", "here\n");
+    w.writePhone("differs.md", "the phone's\n");
+    await assert.rejects(
+      w.syncPhone({
+        http: (request) => (request.url.endsWith("/git-receive-pack") ? Promise.reject(new Error("no network")) : nodeHttp(request)),
+      }),
+      /no network/,
+    );
     assert.equal(w.readPhone("differs.md"), "the phone's\n");
-    assert.equal(w.readPhone("differs (conflict 2026-11-22 0915).md"), "the computer's\n");
+    const plans: Plan[] = [];
+    const result = await w.syncPhone({
+      confirm: (plan) => {
+        plans.push(plan);
+        return Promise.resolve(true);
+      },
+    });
+    assert.deepEqual([plans[0].first, plans[0].replace], [true, ["differs.md"]]);
+    assert.deepEqual([result.replaced, result.conflicts, result.uploaded], [["differs.md"], [], ["here.md"]]);
+    assert.equal(w.readPhone("differs.md"), "the computer's\n");
+    // Done with: a file that both sides change from here on is not replaced without a copy
+    w.pullPc();
+    w.writePc("differs.md", "the computer's, again\n");
+    w.pushPc();
+    w.writePhone("differs.md", "the phone's, again\n");
+    const later = await w.syncPhone({ mergeText: false });
+    assert.deepEqual([later.replaced, later.conflicts.length], [[], 1]);
+  });
+
+  it("leaves out at a first sync what the .gitignore of the repository leaves out", async () => {
+    const w = setup({ "a.md": "a\n", ".gitignore": "*.tmp\n/settings/device.json\n", "sub/.gitignore": "*.log\n" });
+    w.writePhone("mine.md", "mine\n");
+    w.writePhone("scratch.tmp", "not for the repository\n");
+    w.writePhone("settings/device.json", "{}\n");
+    w.writePhone("settings/shared.json", "{}\n");
+    w.writePhone("sub/run.log", "a log\n");
+    w.writePhone("run.log", "a log at the top\n");
+    const result = await w.syncPhone();
+    assert.deepEqual(result.uploaded.sort(), ["mine.md", "run.log", "settings/shared.json"]);
+    assert.deepEqual(w.pathsThere(), [".gitignore", "a.md", "mine.md", "run.log", "settings/shared.json", "sub/.gitignore"]);
+    assert.deepEqual([w.readPhone("scratch.tmp"), w.readPhone("sub/run.log")], ["not for the repository\n", "a log\n"]);
+    assert.equal(w.readPhone(".gitignore"), "*.tmp\n/settings/device.json\n");
+
+    // Later too: a rule that the computer adds counts for what the phone made in the meantime
+    w.pullPc();
+    w.writePc(".gitignore", "*.tmp\n/settings/device.json\n*.bak\n");
+    w.pushPc();
+    w.writePhone("old.bak", "a file of the phone\n");
+    w.writePhone("new.md", "new\n");
+    const later = await w.syncPhone();
+    assert.deepEqual([later.uploaded, later.downloaded], [["new.md"], [".gitignore"]]);
+    assert.ok(!w.pathsThere().includes("old.bak"));
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded], [[], []]);
+  });
+
+  it("writes a file that is too large at a first sync into the .gitignore of the repository", async () => {
+    const w = setup({ "a.md": "a\n", ".gitignore": "*.tmp\n" });
+    w.writePhone("video.mp4", Buffer.alloc(20_000, 7));
+    w.writePhone("scratch.tmp", "not for the repository\n");
+    const result = await w.syncPhone();
+    assert.deepEqual([result.tooLargeIgnored, result.uploaded, result.replaced], [["video.mp4"], [".gitignore"], []]);
+    const rules = w.readPhone(".gitignore")!;
+    assert.ok(rules.startsWith("*.tmp\n") && rules.includes(BLOCK_START) && rules.includes("video.mp4"));
+    assert.deepEqual(w.pathsThere(), [".gitignore", "a.md"]);
+    w.pullPc();
+    assert.equal(w.readPc(".gitignore"), rules);
+    const again = await w.syncPhone();
+    assert.deepEqual([again.downloaded, again.uploaded, again.tooLargeIgnored], [[], [], []]);
   });
 
   it("sends many changes as several commits of a bounded size", async () => {
@@ -685,8 +820,9 @@ describe("sync", () => {
     const result = await w.syncPhone();
 
     const copies = { "plan/steps.md": "plan (conflict 2026-11-22 0915)/steps.md", notes: "notes (conflict 2026-11-22 0915)" };
+    assert.deepEqual(result.conflicts, []);
     assert.deepEqual(
-      result.conflicts.sort((x, y) => x.path.localeCompare(y.path)),
+      result.clashes.sort((x, y) => x.path.localeCompare(y.path)),
       [
         { path: "notes", copy: copies.notes },
         { path: "plan/steps.md", copy: copies["plan/steps.md"] },
@@ -704,7 +840,7 @@ describe("sync", () => {
     assert.equal(w.readPc("notes/idea.md"), "the phone made a folder\n");
     assert.equal(w.readPc(copies.notes), "the computer made a file\n");
     const again = await w.syncPhone();
-    assert.deepEqual([again.downloaded, again.uploaded, again.conflicts], [[], [], []]);
+    assert.deepEqual([again.downloaded, again.uploaded, again.conflicts, again.clashes], [[], [], [], []]);
   });
 
   it("puts a file where the vault has an empty folder of that name", async () => {
@@ -776,8 +912,9 @@ describe("sync", () => {
         }),
         CancelledError,
       );
-      assert.deepEqual([...plans], [{ first: true, tracked: 0, take: 3, send: 2, removeHere: [], removeThere: [], bothChanged: ["a.md"] }]);
+      assert.deepEqual([...plans], [{ first: true, tracked: 0, take: 3, send: 1, removeHere: [], removeThere: [], replace: ["a.md"], bothChanged: [] }]);
       assert.deepEqual([w.readPhone("b.md"), existsSync(path.join(w.phoneDir, ".piecemeal/state.json")), w.pathsThere()], [null, false, ["a.md", "b.md", "c.md"]]);
+      assert.equal(w.readPhone("a.md"), "a of the phone\n");
 
       await w.syncPhone({ confirm: () => Promise.resolve(true) });
       w.removePhone("b.md");
@@ -788,7 +925,7 @@ describe("sync", () => {
           return Promise.resolve(true);
         },
       });
-      assert.deepEqual(plans[1], { first: false, tracked: 5, take: 0, send: 0, removeHere: ["c.md"], removeThere: ["b.md"], bothChanged: [] });
+      assert.deepEqual(plans[1], { first: false, tracked: 4, take: 0, send: 0, removeHere: ["c.md"], removeThere: ["b.md"], replace: [], bothChanged: [] });
     });
 
     it("asks once, also when the sync starts over", async () => {

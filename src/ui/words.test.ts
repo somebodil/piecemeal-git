@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { RemoteError } from "../git/protocol.ts";
-import { type Plan } from "../git/sync.ts";
-import { ago, explain, files, httpsAddress, list, progressText, worthAsking } from "./words.ts";
+import { type Plan, type SyncResult } from "../git/sync.ts";
+import { ago, concerns, explain, files, httpsAddress, list, notes, progressText, restart, worthAsking } from "./words.ts";
 
 describe("the words of the plugin", () => {
   it("says how long ago a sync was", () => {
@@ -38,15 +38,45 @@ describe("the words of the plugin", () => {
   });
 
   it("asks before a first sync of two sides that both hold files, and before many files go", () => {
-    const plan = (over: Partial<Plan>): Plan => ({ first: false, tracked: 100, take: 0, send: 0, removeHere: [], removeThere: [], bothChanged: [], ...over });
+    const plan = (over: Partial<Plan>): Plan => ({ first: false, tracked: 100, take: 0, send: 0, removeHere: [], removeThere: [], replace: [], bothChanged: [], ...over });
     const paths = (n: number): string[] => Array.from({ length: n }, (_, i) => `note ${i}.md`);
     assert.equal(worthAsking(plan({ first: true, take: 300 })), false);
     assert.equal(worthAsking(plan({ first: true, send: 300 })), false);
     assert.equal(worthAsking(plan({ first: true, take: 300, send: 2 })), true);
+    // Nothing to send, but files of the vault give way to those of the repository
+    assert.equal(worthAsking(plan({ first: true, take: 300, replace: paths(3) })), true);
     assert.equal(worthAsking(plan({ take: 50, send: 50, removeHere: paths(9), removeThere: paths(24) })), false);
     assert.equal(worthAsking(plan({ removeThere: paths(25) })), true);
     assert.equal(worthAsking(plan({ removeHere: paths(30) })), true);
     assert.equal(worthAsking(plan({ tracked: 12, removeHere: paths(9) })), false);
     assert.equal(worthAsking(plan({ tracked: 2000, removeThere: paths(400) })), false);
+  });
+
+  it("says which version has the name of a file that both sides changed, and when Obsidian has to start again", () => {
+    const result = (over: Partial<SyncResult>): SyncResult => ({
+      commit: null,
+      downloaded: [],
+      uploaded: [],
+      deletedHere: [],
+      deletedThere: [],
+      merged: [],
+      conflicts: [],
+      replaced: [],
+      clashes: [],
+      tooLargeIgnored: [],
+      tooLargeChanged: [],
+      tooLargeThere: [],
+      sameName: [],
+      busy: [],
+      ...over,
+    });
+    assert.match(concerns(result({ conflicts: [{ path: "a.md", copy: "a (conflict 2026-11-22 0915).md" }] }))[0], /^Changed on both sides: a\.md\. The version of the repository has the name now/);
+    assert.match(concerns(result({ clashes: [{ path: "notes", copy: "notes (conflict 2026-11-22 0915)" }] }))[0], /What is here keeps the name/);
+    assert.deepEqual(concerns(result({ replaced: ["a.md"] })), []);
+    assert.match(notes(result({ replaced: ["a.md", "b.md"] }))[0], /replaced by its version: a\.md, b\.md\.$/);
+    assert.deepEqual(restart(result({ downloaded: ["note.md", "settings.md"] }), ".obsidian"), []);
+    assert.equal(restart(result({ downloaded: [".obsidian/app.json"] }), ".obsidian").length, 1);
+    assert.equal(restart(result({ deletedHere: ["config/plugins/x/main.js"] }), "config").length, 1);
+    assert.deepEqual(restart(result({ uploaded: [".obsidian/app.json"] }), ".obsidian"), []);
   });
 });

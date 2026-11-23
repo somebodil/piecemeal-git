@@ -12,7 +12,7 @@ It speaks the git protocol itself and needs no git program. What sets it apart i
 
 In Obsidian, open the settings, go to "Community plugins", look for "Piecemeal Git", install it and turn it on. Then give it the address of a repository and a token, as told under "Trying it" below.
 
-Try it on a copy of a vault first. It has run on an emulated phone and not yet on one that a person holds in a hand.
+Try it on a copy of a vault first. It has run on an emulated phone, and on a device that a person holds in a hand only once: the first sync of a tablet.
 
 ## What it sends, and where
 
@@ -24,7 +24,7 @@ Try it on a copy of a vault first. It has run on an emulated phone and not yet o
 
 ## State
 
-The sync works from a terminal, inside the desktop app of Obsidian, and inside the mobile app on an emulated Android phone and tablet. It has not run on a device that one holds in a hand, and not on an iPhone or iPad.
+The sync works from a terminal, inside the desktop app of Obsidian, and inside the mobile app on an emulated Android phone and tablet. On a device that one holds in a hand it has run once, on an Android tablet, and not on an iPhone or iPad.
 
 What has been checked, and how:
 
@@ -36,6 +36,7 @@ What has been checked, and how:
 - Inside the mobile app of Obsidian 1.15.1, on an emulated phone and an emulated tablet with Android 17, the plugin synced a vault with the git server that comes with git: a first sync, changes of both sides, a file that both changed, removals, binary files of several megabytes each way, a name that is a file on one side and a folder on the other, a sync when the app starts, and a sync without a network. After every step a clone made by git had the same files as the device, and `git fsck` had nothing to say.
 - On the emulated phone again, with what came later. A text that both sides changed was put together. One that both changed in the same lines got its copy, and so did an image. A server that asks for a name and a password turned the plugin away without them and with a wrong password, and let it in with the right one, kept in the secret storage of Obsidian. A sync that the timer started took a change of the computer. A server that tells sizes was asked for them, and a file of 3 MB stayed out under a limit of 1 MB. A link came as a file that holds where it points, and went back as a link after another place was written into it. From GitHub, a public repository of 324 files came in 5.5 seconds, each as a clone made by git has it. A folder that got another name on the phone went to the remote in one small request, and a branch that the remote did not have was made from the one before, with a note that the other branch then did not get. A private repository on GitHub, with a token, was not tried there.
 - That run showed that the app on Android loses a write now and then: it says that a file is written, and the file is there and empty. In 45 syncs this happened to 3 files. Since then every write is looked at afterwards, as told below.
+- On an Android tablet that a person holds in a hand, a real vault came from a private repository on GitHub in a first sync, with a token, and one file of it in ranges of bytes. Every file had the id that git gives it. That sync also showed what a first sync did wrong then: the settings that Obsidian had made for the new vault stayed and went to the repository, and so did a file that the `.gitignore` of the repository leaves out. Since then the repository is right at a first sync, as told below.
 - On a Mac, from a terminal, through a file system that keeps names as an iPhone does: a vault of some hundred files, many of them with Korean names, came from the git server that comes with git. Every file had the id that git gives it, and a second sync sent nothing. Then both sides changed, added, removed and renamed files, and both changed one. A clone made by git had the same files, `git fsck` had nothing to say, and no name had reached the repository with its letters apart. How an iPhone keeps names was found by asking the file functions of Apple on the Mac, not on an iPhone.
 
 ## How it syncs
@@ -44,7 +45,8 @@ The device keeps no commits of its own. A sync compares three things for each pa
 
 - What changed on one side goes to the other.
 - A text that both sides changed in different places gets both changes, line by line, as `git merge-file` does. The device does not keep the text as it was, so it asks the remote for it.
-- Any other file that both sides changed stays as it is here: one that is not a text, a text in which both changed the same lines or lines next to each other, and every file if you turn this off in the settings. The version of the remote is kept beside it, as `name (conflict 2026-11-22 0915).md`.
+- For any other file that both sides changed, the repository is right: its version takes the name. Yours is kept beside it, as `name (conflict 2026-11-22 0915).md`, and goes to the repository as well. This is so for a file that is not a text, for a text in which both changed the same lines or lines next to each other, and for every file if you turn the putting together off in the settings.
+- At the first sync of a vault with a repository, nothing has been agreed on yet. Each side gets what only the other has, and a file that both have is as the repository has it afterwards, with no copy. A note of yours that gives way goes where Obsidian puts the files that you delete. So the settings that Obsidian makes for a new vault do not stand in the way of the settings that the repository holds. A first sync that was cut off goes on as a first sync.
 - A change wins over a removal.
 - A name that is a file on one side and a folder on the other is kept on both: what is here keeps the name, and what the remote has goes beside it, as `name (conflict 2026-11-22 0915)`.
 - What the device changed becomes commits on top of the remote, each with about 4 MB of content. The history of the branch stays a line.
@@ -53,6 +55,7 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A folder that loses its last file to a sync is removed. One that still holds something, such as a file that is not synced, stays.
 - A file that was changed in the three seconds before a sync is read again by the next one. Its size and time alone would not tell a second change in the same moment.
 - The `.gitignore` of the vault and the `.gitignore` files of its folders say what is left out, read as git reads them. A file that the repository tracks stays tracked.
+- A `.gitignore` that a sync is about to take from the repository counts in that sync already. So a vault that meets a repository for the first time does not send what the repository leaves out, and a rule that another device added holds for what this one made in the meantime.
 - A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
 - An iPhone, an iPad and a Mac keep a name like `한글.md` or `é.md` with each letter taken apart into its parts, whatever the name was written as, and git keeps a name as it is given. On those devices a file of the vault has the name that the repository has for it, and a new file is sent with the letters of its name in one piece, as git does on a Mac. So a name does not change in the repository by going through such a device.
 - A sync that finds nothing to do is short. For a note that Obsidian knows to be as it was, the disk is not asked. While the remote has not moved, its files are known from one file. On an emulated phone such a sync of a hundred notes took a tenth of a second.
@@ -78,7 +81,7 @@ Files that are too large:
 - A tracked file that grows above the limit on the device is not sent. The repository keeps its version, and every sync says so.
 - A tracked file above the limit that gets another name on the device keeps what the repository has for it, under the new name. It is too large to be read, so it is known by its size: a new file above the limit that has, to the byte, the size of a tracked file that is gone is taken for that file.
 
-The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, one file that says what was agreed on, and one that lists the files of the commit that the remote was at. Without that folder, or with a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs gets its copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian, nor the two files in which Obsidian keeps what is open on a device are ever synced. What the repository has under those names stays there and is not taken.
+The plugin keeps what it knows in the folder `.piecemeal` of the vault: commits, folders, one file that says what was agreed on, and one that lists the files of the commit that the remote was at. Without that folder, the vault meets the repository as at a first sync. With a file in it that cannot be read, the vault joins the remote anew: nothing is removed on either side, each side gets what only the other has, and a file that differs is as the repository has it, with your version kept beside it as a copy. Neither that folder, nor a `.git` folder, nor the settings of the plugin, nor the trash of Obsidian, nor the two files in which Obsidian keeps what is open on a device are ever synced. What the repository has under those names stays there and is not taken.
 
 ## Trying it
 
@@ -107,17 +110,20 @@ Try it on a copy of a vault first.
 - While a sync runs, a notice says how far it is, and the icon of the ribbon turns. The desktop app also says it in the bar at the bottom, and there it says afterwards how long ago the last sync was.
 - A sync that went well says in a line what it took and sent, and the line goes away by itself. One that left something to look at stays until you close it, and has a button that shows the files. The icon then has a dot.
 - "Show what the last sync did" lists the files of the last sync by what was done with them, and a file opens when you press its name.
-- The same list shows every file of the vault that has a copy from the other side beside it, with two buttons: "Keep mine" removes the copy, and "Take the other" puts the copy in the place of your file. The next sync sends what you chose.
-- Before the first sync of a vault that holds files with a repository that holds files, and before a sync that removes ten files or more that are a quarter of all, a dialog says what is about to happen and waits for you. A sync that started by itself does not do such a thing: it stops, and tells you to start one yourself.
+- The same list shows every file of the vault that has a copy of your version beside it, with two buttons: "Keep the repository's" removes the copy, and "Take mine back" puts the copy in the place of the file. The next sync sends what you chose.
+- Before the first sync of a vault that holds files with a repository that holds files, and before a sync that removes ten files or more that are a quarter of all, a dialog says what is about to happen and waits for you. Before a first sync it names the files that give way to those of the repository. A sync that started by itself does not do such a thing: it stops, and tells you to start one yourself.
+- Obsidian reads its settings and its plugins when it starts. After a sync that took some of them, the notice stays and tells you to close Obsidian and open it again. Until then Obsidian goes on with what it read, and writes that back when you change a setting.
+- The list of the plugins that are on is a file of the settings too, and a sync takes the one of the repository. If that list does not name this plugin, the plugin adds itself to it again, and the next sync sends the list. Otherwise the plugin would be off the next time Obsidian starts.
 - A file that another device removed goes where Obsidian puts the files that you delete, as its settings say: its trash, the one of the system, or nowhere.
 - A sync that failed says what to do where that is known: give a token, look at the address, connect the device.
 
 ## Not done yet
 
-- It has not run on a real phone or tablet, and not on iOS. Inside Obsidian on a Mac it has not run either.
+- On a real device it has run once, the first sync of an Android tablet. It has not run on a real phone, and not on iOS. Inside Obsidian on a Mac it has not run either.
 - The dialogs, the notices and the settings were looked at on the emulated Android phone only. The bar at the bottom of the desktop app was not seen at all.
 - All that the plugin says is in English.
 - What came after the runs inside Obsidian on a computer and with a private repository on GitHub has not run there: texts that are put together, links, branches, the look at every write. It ran in the tests and on the emulated phone.
+- That the repository is right about a file that both sides changed, and at a first sync, came after the sync of the tablet. It ran in the tests, and from a terminal against a copy of that vault with the files of the tablet as they were. Inside Obsidian it has not run yet.
 - Files that a repository keeps with Git LFS come as the small files that stand for them, as they do for a git without LFS.
 - The server has to speak version 2 of the git protocol, which git has done since 2018, and name its objects with SHA-1.
 - A device that keeps the letters of a name apart cannot hold two files whose names differ in this only. The second one is left out of the vault, like one that differs in capital letters only.

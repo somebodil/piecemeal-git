@@ -27,7 +27,7 @@ export class ConfirmModal extends Modal {
     this.setTitle(plan.first ? "First sync with this repository" : "This sync removes many files");
     if (plan.first) {
       contentEl.createEl("p", {
-        text: "This vault and the repository have not been synced before. Nothing is removed on either side: each gets what only the other has.",
+        text: "This vault and the repository have not been synced before. Nothing is removed on either side: each gets what only the other has. A file that both have is as the repository has it afterwards.",
       });
     }
     const rows = contentEl.createEl("ul", { cls: "piecemeal-git-plan" });
@@ -53,12 +53,18 @@ export class ConfirmModal extends Modal {
     if (plan.send > 0) {
       row(`${say(plan.send, "goes", "go")} from this vault to the repository.`);
     }
-    if (plan.bothChanged.length > 0) {
+    if (plan.replace.length > 0) {
       // Without a sync before, there is no text as it was to put two versions together from
-      const kept = plan.first
-        ? "Your version stays, and the other one is kept beside it as a copy."
-        : "Texts are put together where that works out. Otherwise your version stays, and the other one is kept beside it as a copy.";
-      row(`${say(plan.bothChanged.length, "differs", "differ")} on the two sides. ${kept}`, plan.bothChanged);
+      row(
+        `${say(plan.replace.length, "differs", "differ")} on the two sides. The version of the repository takes ${plan.replace.length === 1 ? "its" : "their"} place. A note of yours that gives way goes where Obsidian puts the files that you delete.`,
+        plan.replace,
+      );
+    }
+    if (plan.bothChanged.length > 0) {
+      row(
+        `${say(plan.bothChanged.length, "was", "were")} changed on both sides. Texts are put together where that works out. Otherwise the version of the repository takes the name, and yours is kept beside it as a copy.`,
+        plan.bothChanged,
+      );
     }
     if (plan.removeHere.length > 0) {
       row(`${say(plan.removeHere.length, "was", "were")} removed from the repository, and will be removed from this vault.`, plan.removeHere);
