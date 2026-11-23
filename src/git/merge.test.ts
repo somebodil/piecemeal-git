@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { decode, encode } from "./bytes.ts";
-import { isText, merge3 } from "./merge.ts";
+import { diffCounts, type DiffRow, diffRows, diffText, isText, merge3, sameRows } from "./merge.ts";
 
 function merged(base: string, ours: string, theirs: string): string | null {
   const out = merge3(encode(base), encode(ours), encode(theirs));
@@ -97,5 +97,104 @@ describe("merge3", () => {
       rmSync(dir, { recursive: true, force: true });
     }
     assert.ok(together > 100, `only ${together} of 250 texts were put together`);
+  });
+});
+
+describe("diffText", () => {
+  /** What the rows show of each side, with every fold opened. */
+  const sides = (rows: DiffRow[], before: string[]): { old: string; now: string } => {
+    let old = "";
+    let now = "";
+    for (const row of rows) {
+      const lines = row.kind === "fold" ? [...sameRows(before, row.oldStart, row.newStart, row.count)] : [row];
+      for (const line of lines) {
+        if (line.kind === "fold") {
+          continue;
+        }
+        old += line.kind === "added" ? "" : line.text;
+        now += line.kind === "removed" ? "" : line.text;
+      }
+    }
+    return { old, now };
+  };
+
+  it("tells the lines that were added and taken away, with a few lines around them and the rest folded", () => {
+    const before = Array.from({ length: 30 }, (_, i) => `line ${i + 1}\n`).join("");
+    const after = before.replace("line 10\n", "line ten\n").replace("line 25\n", "") + "a last line";
+    const diffed = diffText(encode(before), encode(after))!;
+    assert.deepEqual(diffCounts(diffed), { added: 2, removed: 2 });
+    assert.equal(diffed.coarse, false);
+    const rows = [...diffRows(diffed)];
+    assert.deepEqual(
+      rows.map((row) => (row.kind === "fold" ? `fold ${row.count}` : `${row.kind[0]} ${row.oldLine ?? "-"} ${row.newLine ?? "-"}`)),
+      [
+        "fold 6", "s 7 7", "s 8 8", "s 9 9", "r 10 -", "a - 10", "s 11 11", "s 12 12", "s 13 13",
+        "fold 8", "s 22 22", "s 23 23", "s 24 24", "r 25 -", "s 26 25", "s 27 26", "s 28 27",
+        // Five lines lie between the last two changes: three after the one and two before the other, and no fold
+        "s 29 28", "s 30 29", "a - 30",
+      ],
+    );
+    assert.deepEqual(sides(rows, diffed.before), { old: before, now: after });
+    // A fold tells where its lines are in both texts
+    assert.deepEqual(rows[9], { kind: "fold", oldStart: 13, newStart: 13, count: 8 });
+    assert.deepEqual([...sameRows(diffed.before, 13, 13, 1)], [{ kind: "same", text: "line 14\n", oldLine: 14, newLine: 14 }]);
+  });
+
+  it("shows a new file and one that is gone as all added and all taken away", () => {
+    const text = "one\ntwo\n";
+    const added = diffText(new Uint8Array(0), encode(text))!;
+    assert.deepEqual([diffCounts(added), [...diffRows(added)].map((row) => row.kind)], [{ added: 2, removed: 0 }, ["added", "added"]]);
+    const removed = diffText(encode(text), new Uint8Array(0))!;
+    assert.deepEqual([diffCounts(removed), [...diffRows(removed)].map((row) => row.kind)], [{ added: 0, removed: 2 }, ["removed", "removed"]]);
+    assert.deepEqual(diffText(encode(text), encode(text))?.changes, []);
+  });
+
+  it("does not compare what is not a text", () => {
+    assert.equal(diffText(new Uint8Array([1, 0, 2]), encode("text\n")), null);
+    assert.equal(diffText(encode("text\n"), new Uint8Array([0xff, 0xfe])), null);
+  });
+
+  it("shows two texts that are too far apart as one change between what they start and end with alike", () => {
+    const lines = (word: string, count: number): string => Array.from({ length: count }, (_, i) => `${word} ${i}\n`).join("");
+    const before = `top\n${lines("old", 5000)}bottom\n`;
+    const after = `top\n${lines("new", 4500)}bottom\n`;
+    const diffed = diffText(encode(before), encode(after))!;
+    assert.equal(diffed.coarse, true);
+    assert.deepEqual(diffed.changes, [{ oldStart: 1, oldEnd: 5001, newStart: 1, newEnd: 4501 }]);
+    assert.deepEqual(diffCounts(diffed), { added: 4500, removed: 5000 });
+    // The rows come as they are asked for: the first few cost nothing of the rest
+    const rows = diffRows(diffed);
+    assert.deepEqual([rows.next().value, rows.next().value], [
+      { kind: "same", text: "top\n", oldLine: 1, newLine: 1 },
+      { kind: "removed", text: "old 0\n", oldLine: 2, newLine: null },
+    ]);
+  });
+
+  it("turns the one text into the other, whatever the two are", () => {
+    let seed = 42;
+    const random = (): number => {
+      seed = (seed * 1103515245 + 12345) >>> 0;
+      return seed / 2 ** 32;
+    };
+    const words = ["alpha\n", "beta\n", "gamma\n", "\n", "delta\r\n", "한글\n", "alpha\n"];
+    for (let round = 0; round < 300; round++) {
+      const text = (): string => {
+        const count = Math.floor(random() * 40);
+        let out = "";
+        for (let i = 0; i < count; i++) {
+          out += words[Math.floor(random() * words.length)];
+        }
+        return random() < 0.2 ? `${out}no end of line` : out;
+      };
+      const before = text();
+      // Mostly the same text with a few changes, sometimes another one altogether
+      const after = random() < 0.2 ? text() : before.split(/(?<=\n)/).filter(() => random() > 0.15).flatMap((line) => (random() < 0.15 ? [line, "added\n"] : [line])).join("");
+      const diffed = diffText(encode(before), encode(after))!;
+      for (const context of [0, 3]) {
+        assert.deepEqual(sides([...diffRows(diffed, context)], diffed.before), { old: before, now: after }, JSON.stringify({ before, after, context }));
+      }
+      const counts = diffCounts(diffed);
+      assert.equal(diffed.before.length - counts.removed + counts.added, diffed.after.length);
+    }
   });
 });

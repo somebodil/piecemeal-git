@@ -1,4 +1,4 @@
-import { type App, ButtonComponent, ItemView, Modal, Notice, TFile, TFolder, type WorkspaceLeaf } from "obsidian";
+import { type App, ButtonComponent, ExtraButtonComponent, ItemView, Modal, Notice, TFile, TFolder, type WorkspaceLeaf } from "obsidian";
 import type PiecemealGitPlugin from "../main.ts";
 import { ago, headline } from "./words.ts";
 
@@ -86,6 +86,54 @@ export class Report {
     });
   }
 
+  /** True if the report is on the screen, and not in a sidebar that is closed. */
+  isShown(): boolean {
+    return this.el.isShown();
+  }
+
+  /**
+   * The files that are not as they were at the last sync. A file that is
+   * pressed shows what changed in it, line by line.
+   */
+  private changed(): void {
+    const { el, plugin } = this;
+    if (!plugin.looked) {
+      // Not looked at yet. The plugin draws the report anew when it has.
+      void plugin.look();
+      return;
+    }
+    const { changes } = plugin;
+    if (changes === null) {
+      // Never synced: there is nothing to hold the vault against
+      return;
+    }
+    const head = el.createDiv({ cls: "piecemeal-git-changes-head" });
+    head.createEl("h4", { text: `Changed here since the last sync (${changes.length})` });
+    new ExtraButtonComponent(head)
+      .setIcon("rotate-cw")
+      .setTooltip("Look at the vault again")
+      .onClick(() => {
+        void plugin.look();
+      });
+    if (changes.length === 0) {
+      el.createEl("p", { text: "Nothing. The vault is as the last sync left it.", cls: "piecemeal-git-note" });
+      return;
+    }
+    el.createEl("p", { text: "Press a file to see what changed in it. The next sync sends these.", cls: "piecemeal-git-note" });
+    const rows = el.createEl("ul", { cls: "piecemeal-git-changes" });
+    for (const change of changes.slice(0, 300)) {
+      const item = rows.createEl("li");
+      item.createSpan({ text: change.kind, cls: `piecemeal-git-kind piecemeal-git-kind-${change.kind}` });
+      const link = item.createEl("a", { text: change.path, cls: "piecemeal-git-path" });
+      link.addEventListener("click", () => {
+        plugin.openDiff(change);
+      });
+    }
+    if (changes.length > 300) {
+      rows.createEl("li", { text: `and ${changes.length - 300} more` });
+    }
+  }
+
   /** Says how far the sync is that runs. Costs one text, so it can be told often. */
   progress(text: string): void {
     this.progressEl?.setText(text);
@@ -136,6 +184,8 @@ export class Report {
         // The plugin draws every report anew when a sync starts and when it ends
         void plugin.sync();
       });
+
+    this.changed();
 
     const copies = [...plugin.copies].sort((a, b) => a.localeCompare(b));
     if (copies.length > 0) {

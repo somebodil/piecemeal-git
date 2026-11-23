@@ -429,6 +429,38 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
   }
 }
 
+/** A file of the vault that is not as it was when the vault was last synced. */
+export interface LocalChange {
+  path: string;
+  /** A file that got another name is one that was removed and a new one, as it is to git */
+  kind: "changed" | "new" | "removed";
+  /** What was agreed on for the file, or null for a new one */
+  before: Entry | null;
+  /** How large the file was when it was agreed on, where that was noted. Null for a new one. */
+  beforeSize: number | null;
+  /** How large the file is now. Null for one that is gone. */
+  size: number | null;
+}
+
+/** What changed in the vault since it was last synced. */
+export interface LocalChanges {
+  /** False if the vault was never synced. Then there is nothing to hold it against, and no changes are told. */
+  synced: boolean;
+  /** By their paths, in the order of the letters */
+  changes: LocalChange[];
+}
+
+/**
+ * Finds what changed in the vault since the last sync: the files that have
+ * other contents now, the new ones and the ones that are gone. It asks the
+ * vault only. The remote is not asked, and nothing is written.
+ */
+export async function localChanges(options: SyncOptions): Promise<LocalChanges> {
+  const local: LocalChanges = { synced: false, changes: [] };
+  await attemptSync(options, emptyResult(), local);
+  return local;
+}
+
 function emptyResult(): SyncResult {
   return {
     commit: null,
@@ -448,7 +480,8 @@ function emptyResult(): SyncResult {
   };
 }
 
-async function attemptSync(options: SyncOptions, result: SyncResult): Promise<void> {
+/** @param local if given, the changes of the vault since the last sync are put into it, and that is all that is done */
+async function attemptSync(options: SyncOptions, result: SyncResult, local?: LocalChanges): Promise<void> {
   const { fs, http, remote } = options;
   const log = options.log ?? (() => undefined);
   const now = (options.now ?? (() => new Date()))();
@@ -668,6 +701,56 @@ async function attemptSync(options: SyncOptions, result: SyncResult): Promise<vo
       }
       state = { ...state, ...parsed, stat: parsed.stat ?? {}, absent: parsed.absent ?? {} };
     }
+  }
+
+  if (local !== undefined) {
+    if (saved === null || lost) {
+      return;
+    }
+    local.synced = true;
+    const agreed = new Map(Object.entries(state.tree));
+    noteSpelling(agreed.keys());
+    const { found, seen, scanned } = await look(new Map(), agreed, state);
+    const changed = new Map<string, LocalChange>();
+    /** Files that are not as they were by their size or time, and have to be read to know */
+    const unread: string[] = [];
+    for (const path of found) {
+      const stat = scanned.get(path);
+      if (stat === undefined) {
+        continue;
+      }
+      const before = agreed.get(path);
+      const noted = state.stat[path];
+      if (before === undefined) {
+        changed.set(path, { path, kind: "new", before: null, beforeSize: null, size: stat.size });
+      } else if (noted !== undefined && noted.size === stat.size && noted.mtime === stat.mtime && (state.racy?.[path] !== true || stat.size > options.maxFileBytes)) {
+        // As it was
+      } else if (stat.size > options.maxFileBytes) {
+        // Too large to read: another size or time is all that tells
+        changed.set(path, { path, kind: "changed", before, beforeSize: noted?.size ?? null, size: stat.size });
+      } else {
+        unread.push(path);
+      }
+    }
+    const read = async (path: string): Promise<void> => {
+      const before = agreed.get(path)!;
+      const data = (await linkAt(path)) ?? (await fs.read(path));
+      if (data !== null && (await objectId({ type: "blob", data })) !== before.oid) {
+        changed.set(path, { path, kind: "changed", before, beforeSize: state.stat[path]?.size ?? null, size: data.length });
+      }
+    };
+    await Promise.all(unread.filter((path) => scanned.get(path)!.size <= SMALL_BYTES).map((path) => gate.run(() => read(path))));
+    for (const path of unread.filter((path) => scanned.get(path)!.size > SMALL_BYTES)) {
+      await read(path);
+    }
+    for (const [path, before] of agreed) {
+      // What is tracked but not in the vault on purpose is not gone
+      if (!seen.has(path) && state.absent[path] !== true && inVault(before) && !excluded(path, false)) {
+        changed.set(path, { path, kind: "removed", before, beforeSize: state.stat[path]?.size ?? null, size: null });
+      }
+    }
+    local.changes = [...changed.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return;
   }
 
   // --- What the remote holds now --------------------------------------------

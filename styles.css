@@ -124,3 +124,125 @@
 .piecemeal-git-view .piecemeal-git-buttons {
   justify-content: flex-start;
 }
+
+/* The files that changed since the last sync: what kind of change, and the path. */
+.piecemeal-git-changes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+}
+
+.piecemeal-git-changes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.piecemeal-git-changes > li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-2);
+  padding: var(--size-2-1) 0;
+}
+
+.piecemeal-git-kind {
+  flex: none;
+  min-width: 4.5em;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.piecemeal-git-kind-new {
+  color: var(--color-green);
+}
+
+.piecemeal-git-kind-removed {
+  color: var(--color-red);
+}
+
+/* The comparison of a file: as wide and as high as the window lets it be, with the rows in a box that scrolls. */
+.modal.piecemeal-git-diff-modal {
+  width: min(1000px, 92vw);
+  height: 85vh;
+  max-height: 85vh;
+}
+
+.piecemeal-git-diff-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.piecemeal-git-diff-head {
+  margin-bottom: var(--size-4-2);
+}
+
+.piecemeal-git-diff-plus {
+  color: var(--color-green);
+}
+
+.piecemeal-git-diff-minus {
+  color: var(--color-red);
+}
+
+.piecemeal-git-diff {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  font-family: var(--font-monospace);
+  font-size: var(--font-smaller);
+  line-height: var(--line-height-tight);
+}
+
+.piecemeal-git-diff-row {
+  display: flex;
+  align-items: baseline;
+}
+
+.piecemeal-git-diff-no {
+  flex: none;
+  width: 3.2em;
+  padding-inline-end: var(--size-2-2);
+  text-align: end;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.piecemeal-git-diff-sign {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+  user-select: none;
+}
+
+.piecemeal-git-diff-text {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.piecemeal-git-diff-added {
+  background-color: rgba(var(--color-green-rgb), 0.15);
+}
+
+.piecemeal-git-diff-removed {
+  background-color: rgba(var(--color-red-rgb), 0.15);
+}
+
+.piecemeal-git-diff-fold {
+  justify-content: center;
+  padding: var(--size-2-1) 0;
+  color: var(--text-muted);
+  background-color: var(--background-secondary);
+  cursor: var(--cursor);
+}
+
+/* A phone has no room for both numbers of a line. */
+.is-phone .piecemeal-git-diff-no:first-child {
+  display: none;
+}

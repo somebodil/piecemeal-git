@@ -1,7 +1,7 @@
 import { encode } from "./bytes.ts";
 
 /** A run of lines of the old text, and the run of lines of the new text that took its place. Ends are not included. */
-interface Change {
+export interface Change {
   oldStart: number;
   oldEnd: number;
   newStart: number;
@@ -221,4 +221,121 @@ export function merge3(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array): 
   }
   out.push(...baseLines.slice(at));
   return encode(out.join(""));
+}
+
+/** Two texts, line by line, and what changed from the first to the second. */
+export interface TextDiff {
+  /** The lines of each text, each with the end of line that it has */
+  before: string[];
+  after: string[];
+  /** The runs of lines that changed, from the top of the texts down */
+  changes: Change[];
+  /**
+   * True if the two are too far apart to be compared line by line. Then
+   * `changes` is one change: all that lies between what they start with and
+   * what they end with alike.
+   */
+  coarse: boolean;
+}
+
+/**
+ * Compares two texts line by line, as `git diff` does. Null if one of them
+ * is not a text, or has more lines than are compared.
+ */
+export function diffText(before: Uint8Array, after: Uint8Array): TextDiff | null {
+  const a = lines(before);
+  const b = lines(after);
+  if (a === null || b === null) {
+    return null;
+  }
+  // A number for each line that is there, so that two lines are compared in one step
+  const numbers = new Map<string, number>();
+  const numbered = (list: string[]): number[] =>
+    list.map((line) => {
+      let number = numbers.get(line);
+      if (number === undefined) {
+        number = numbers.size;
+        numbers.set(line, number);
+      }
+      return number;
+    });
+  const x = numbered(a);
+  const y = numbered(b);
+  const changes = diff(x, y);
+  if (changes !== null) {
+    return { before: a, after: b, changes, coarse: false };
+  }
+  let head = 0;
+  while (head < x.length && head < y.length && x[head] === y[head]) {
+    head++;
+  }
+  let tail = 0;
+  while (tail < x.length - head && tail < y.length - head && x[x.length - 1 - tail] === y[y.length - 1 - tail]) {
+    tail++;
+  }
+  return { before: a, after: b, changes: [{ oldStart: head, oldEnd: x.length - tail, newStart: head, newEnd: y.length - tail }], coarse: true };
+}
+
+/** A line of a comparison as it is shown, or a run of lines that are the same on both sides and are not shown. */
+export type DiffRow =
+  | { kind: "same" | "removed" | "added"; text: string; oldLine: number | null; newLine: number | null }
+  /** `oldStart` and `newStart` are where the run starts in each text, and `count` how many lines it has */
+  | { kind: "fold"; oldStart: number; newStart: number; count: number };
+
+/**
+ * The rows that show a comparison, from the top down: what changed, with a
+ * few lines around each change, and a fold for every longer run of lines
+ * that are the same. They are made one by one as they are asked for, so that
+ * a long comparison costs no more than the part of it that is looked at.
+ *
+ * @param context how many lines that are the same are shown before and after a change
+ */
+export function* diffRows(diffed: TextDiff, context = 3): Generator<DiffRow> {
+  const { before, after, changes } = diffed;
+  let oldAt = 0;
+  let newAt = 0;
+  for (let i = 0; i <= changes.length; i++) {
+    const change = changes[i];
+    // The lines up to the change, or to the end, are the same on both sides
+    const sameEnd = change === undefined ? before.length : change.oldStart;
+    const count = sameEnd - oldAt;
+    const lead = i === 0 ? 0 : Math.min(context, count);
+    const trail = change === undefined ? 0 : Math.min(context, count - lead);
+    yield* sameRows(before, oldAt, newAt, lead);
+    if (count - lead - trail > 0) {
+      yield { kind: "fold", oldStart: oldAt + lead, newStart: newAt + lead, count: count - lead - trail };
+    }
+    yield* sameRows(before, sameEnd - trail, newAt + count - trail, trail);
+    oldAt = sameEnd;
+    newAt += count;
+    if (change === undefined) {
+      break;
+    }
+    for (let line = change.oldStart; line < change.oldEnd; line++) {
+      yield { kind: "removed", text: before[line], oldLine: line + 1, newLine: null };
+    }
+    for (let line = change.newStart; line < change.newEnd; line++) {
+      yield { kind: "added", text: after[line], oldLine: null, newLine: line + 1 };
+    }
+    oldAt = change.oldEnd;
+    newAt = change.newEnd;
+  }
+}
+
+/** Rows for lines that are the same on both sides: `count` of them from `oldStart` of the old text. */
+export function* sameRows(before: string[], oldStart: number, newStart: number, count: number): Generator<DiffRow> {
+  for (let i = 0; i < count; i++) {
+    yield { kind: "same", text: before[oldStart + i], oldLine: oldStart + i + 1, newLine: newStart + i + 1 };
+  }
+}
+
+/** How many lines a comparison adds and takes away. */
+export function diffCounts(diffed: TextDiff): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const change of diffed.changes) {
+    added += change.newEnd - change.newStart;
+    removed += change.oldEnd - change.oldStart;
+  }
+  return { added, removed };
 }

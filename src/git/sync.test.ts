@@ -25,7 +25,7 @@ import { TestServer } from "../../tests/server.ts";
 import { type FileStat, VerifiedFs } from "./fs.ts";
 import { BLOCK_START } from "./ignore.ts";
 import { remoteOf } from "./protocol.ts";
-import { CancelledError, type Plan, sync, type SyncOptions, type SyncResult } from "./sync.ts";
+import { CancelledError, type LocalChanges, localChanges, type Plan, sync, type SyncOptions, type SyncResult } from "./sync.ts";
 
 describe("sync", () => {
   const server = new TestServer();
@@ -98,7 +98,17 @@ describe("sync", () => {
           .sort();
       },
       syncPhone(extra: Partial<SyncOptions> = {}): Promise<SyncResult> {
-        return sync({
+        return sync(world.options(extra));
+      },
+      /** What changed on the phone since its last sync, without a word to the remote. */
+      changesPhone(extra: Partial<SyncOptions> = {}): Promise<LocalChanges> {
+        return localChanges({
+          ...world.options(extra),
+          http: () => Promise.reject(new Error("the remote was asked")),
+        });
+      },
+      options(extra: Partial<SyncOptions> = {}): SyncOptions {
+        return {
           fs: new NodeFs(phoneDir),
           http: nodeHttp,
           remote: { url },
@@ -120,7 +130,7 @@ describe("sync", () => {
           },
           now: () => new Date(2026, 10, 22, 9, 15),
           ...extra,
-        });
+        };
       },
     };
     if (Object.keys(files).length > 0) {
@@ -622,6 +632,70 @@ describe("sync", () => {
     assert.deepEqual([late.tooLargeChanged, late.tooLargeIgnored, late.uploaded, late.downloaded], [["late.pdf"], [], [], []]);
     assert.equal(statSync(path.join(w.phoneDir, "late.pdf")).size, 31_000);
     assert.equal(w.readPhone(".gitignore"), null);
+  });
+
+  it("tells what changed in the vault since the last sync, without asking the remote or writing anything", async () => {
+    const w = setup({
+      "a.md": "a\n",
+      "dir/b.md": "b\n",
+      "dir/c.md": "c\n",
+      "old name.md": "the same under another name\n",
+      "big.bin": Buffer.alloc(20_000, 1),
+      ".gitignore": "*.tmp\n",
+    });
+    // Never synced: nothing to hold the vault against
+    w.writePhone("mine.md", "mine\n");
+    assert.deepEqual(await w.changesPhone(), { synced: false, changes: [] });
+    const fs = new NodeFs(w.phoneDir);
+    await w.syncPhone({
+      largeBlob: async (file, to) => {
+        await fs.write(to, Buffer.alloc(file.size, 1));
+        return true;
+      },
+    });
+    assert.deepEqual(await w.changesPhone(), { synced: true, changes: [] });
+
+    w.writePhone("a.md", "a, changed\n");
+    w.writePhone("dir/new.md", "new\n");
+    w.removePhone("dir/c.md");
+    renameSync(path.join(w.phoneDir, "old name.md"), path.join(w.phoneDir, "new name.md"));
+    w.writePhone("scratch.tmp", "left out by .gitignore\n");
+    w.writePhone("sub/.git/HEAD", "what git keeps\n");
+    // Written again with what it held: another time, and no change
+    w.writePhone("dir/b.md", "b\n");
+    // Too large to read: its size tells
+    w.writePhone("big.bin", Buffer.alloc(21_000, 2));
+    const before = readFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), "utf8");
+    const written: string[] = [];
+    const watched = new NodeFs(w.phoneDir);
+    const write = watched.write.bind(watched);
+    watched.write = (file, data) => {
+      written.push(file);
+      return write(file, data);
+    };
+    const { synced, changes } = await w.changesPhone({ fs: watched });
+    assert.equal(synced, true);
+    assert.deepEqual(
+      changes.map((change) => [change.path, change.kind, change.beforeSize, change.size]),
+      [
+        ["a.md", "changed", 2, 11],
+        ["big.bin", "changed", 20_000, 21_000],
+        ["dir/c.md", "removed", 2, null],
+        ["dir/new.md", "new", null, 4],
+        ["new name.md", "new", null, 28],
+        ["old name.md", "removed", 28, null],
+      ],
+    );
+    assert.equal(changes[0].before?.oid, server.git(path.basename(w.url), "rev-parse", "main:a.md"));
+    assert.deepEqual([written, readFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), "utf8") === before], [[], true]);
+
+    // After the sync that sends them there is nothing left to tell
+    const result = await w.syncPhone();
+    assert.deepEqual(result.tooLargeChanged, ["big.bin"]);
+    assert.deepEqual(
+      (await w.changesPhone()).changes.map((change) => change.path),
+      ["big.bin"],
+    );
   });
 
   it("leaves out what git keeps in a folder of the vault, as it does at the top", async () => {

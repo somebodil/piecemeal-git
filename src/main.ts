@@ -1,10 +1,12 @@
-import { Notice, Platform, Plugin, setIcon, type TAbstractFile, TFile, type WorkspaceLeaf } from "obsidian";
+import { debounce, Notice, Platform, Plugin, setIcon, type TAbstractFile, TFile, type WorkspaceLeaf } from "obsidian";
 import { VerifiedFs } from "./git/fs.ts";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
-import { remoteOf } from "./git/protocol.ts";
-import { CancelledError, type Progress, sync, type SyncResult } from "./git/sync.ts";
+import { parsePack } from "./git/pack.ts";
+import { fetchPack, remoteOf } from "./git/protocol.ts";
+import { CancelledError, type Entry, type LocalChange, localChanges, type Progress, sync, type SyncOptions, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 import { ConfirmModal } from "./ui/confirm.ts";
+import { DiffModal } from "./ui/diff.ts";
 import { conflictCopies, isCopy, type Report, ReportModal, SyncView, VIEW_TYPE } from "./ui/report.ts";
 import { SettingsTab } from "./ui/settings.ts";
 import { DEFAULTS, type DeviceState, type Last, readStored, type Settings, SETTINGS_KEY, STATE_KEY } from "./ui/stored.ts";
@@ -42,6 +44,11 @@ export default class PiecemealGitPlugin extends Plugin {
   readonly copies = new Set<string>();
   /** True once the panel was put into a sidebar */
   private panelPlaced = false;
+  /** What changed in the vault since the last sync, as of the last look. Null if it was not looked at, or never synced. */
+  changes: LocalChange[] | null = null;
+  private looking = false;
+  /** What files held at the last sync, by the ids of what they held: the last few that were asked for */
+  private readonly befores = new Map<string, Uint8Array>();
 
   override async onload(): Promise<void> {
     await this.readStored();
@@ -73,6 +80,10 @@ export default class PiecemealGitPlugin extends Plugin {
       };
       this.registerEvent(this.app.vault.on("create", came));
       this.registerEvent(this.app.vault.on("delete", gone));
+      // What changed since the last sync is shown where a report is on the screen, and follows the vault
+      for (const what of ["create", "modify", "delete", "rename"] as const) {
+        this.registerEvent(this.app.vault.on(what as "modify", () => this.lookSoon()));
+      }
       this.registerEvent(
         this.app.vault.on("rename", (file, before) => {
           if (this.copies.delete(before)) {
@@ -84,7 +95,13 @@ export default class PiecemealGitPlugin extends Plugin {
       this.refresh();
       void this.placePanel();
       // A tab that Obsidian kept for the panel may show after this. Then there is one too many.
-      this.registerEvent(this.app.workspace.on("layout-change", () => this.onePanel()));
+      this.registerEvent(
+        this.app.workspace.on("layout-change", () => {
+          this.onePanel();
+          // A sidebar that is opened shows the panel, with what is true now
+          this.lookSoon();
+        }),
+      );
       if (this.config.onStart) {
         void this.sync(true);
       }
@@ -377,6 +394,135 @@ export default class PiecemealGitPlugin extends Plugin {
   }
 
   /**
+   * What a sync and a look at the vault are told alike: where the vault and
+   * the repository are, who the commits are by, and what is left out.
+   */
+  private common(): { fs: VerifiedFs; options: SyncOptions } {
+    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText } = this.config;
+    const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
+    const fs = new VerifiedFs(
+      new ObsidianFs(
+        this.app.vault.adapter,
+        // A file that the remote removed goes where Obsidian puts the files that a person deletes
+        async (path) => {
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (!(file instanceof TFile)) {
+            return false;
+          }
+          await this.app.fileManager.trashFile(file);
+          return true;
+        },
+        // Obsidian keeps the size and time of every note in mind, which saves a look at the disk for each
+        (path) => {
+          const file = this.app.vault.getAbstractFileByPath(path);
+          return file instanceof TFile ? { size: file.stat.size, mtime: file.stat.mtime } : null;
+        },
+      ),
+    );
+    const remote = remoteOf(url, token);
+    const github = parseGitHub(remote.url);
+    const { configDir } = this.app.vault;
+    // What stays on the device: the settings of this plugin, the trash of Obsidian, and the files in
+    // which Obsidian keeps what is open on this device, which change whenever a note is opened
+    const own = new Set([`${configDir}/plugins/${this.manifest.id}/data.json`, `${configDir}/workspace.json`, `${configDir}/workspace-mobile.json`]);
+    const from = device !== "" ? device : Platform.isTablet ? "a tablet" : Platform.isMobile ? "a phone" : "a computer";
+    return {
+      fs,
+      options: {
+        fs,
+        http: obsidianHttp,
+        remote,
+        branch: branch === "" ? undefined : branch,
+        storeDir: STORE_DIR,
+        exclude: (path) => own.has(path) || path === ".trash" || path.startsWith(".trash/"),
+        author: {
+          name: authorName !== "" ? authorName : "piecemeal-git",
+          email: authorEmail !== "" ? authorEmail : "piecemeal-git@users.noreply.github.com",
+        },
+        message: () => `Sync from ${from}`,
+        // An iPhone, an iPad and a Mac keep the letters of a name like "한글.md" in parts
+        composeNames: Platform.isIosApp || Platform.isMacOS,
+        mergeText,
+        maxFileBytes: maxFileMB * MB,
+        batchBytes: BATCH_BYTES,
+        wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+        sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
+        largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
+      },
+    };
+  }
+
+  /**
+   * Looks at what changed in the vault since the last sync, and shows it.
+   * Only the vault is asked. Not while a sync runs: that changes what is
+   * looked at, and looks again by itself when it ends.
+   */
+  async look(): Promise<void> {
+    if (this.running || this.looking || this.config.url === "") {
+      return;
+    }
+    this.looking = true;
+    try {
+      const local = await localChanges(this.common().options);
+      this.changes = local.synced ? local.changes : null;
+    } catch (error) {
+      console.error("piecemeal-git: the vault could not be looked at", error);
+      this.changes = null;
+    } finally {
+      this.looking = false;
+    }
+    this.looked = true;
+    this.redraw();
+  }
+
+  /** Looks at the vault if a report is on the screen to show what is found. Called often, so it waits for a quiet moment. */
+  private readonly lookSoon = debounce(
+    () => {
+      if (this.reports().some((report) => report.isShown())) {
+        void this.look();
+      }
+    },
+    2000,
+    true,
+  );
+
+  /** True once the vault was looked at, whatever was found */
+  looked = false;
+
+  /**
+   * What a file held when the vault was last synced. The device does not
+   * keep it, so the repository is asked. The last few are kept in mind, for a
+   * comparison that is opened a second time.
+   */
+  async contentBefore(entry: Entry): Promise<Uint8Array> {
+    const kept = this.befores.get(entry.oid);
+    if (kept !== undefined) {
+      return kept;
+    }
+    const { options } = this.common();
+    const fetched = await fetchPack(options.http, options.remote, { wants: [entry.oid] });
+    const object = (await parsePack(fetched.pack)).find((candidate) => candidate.oid === entry.oid);
+    if (object === undefined || object.type !== "blob") {
+      throw new Error("The server did not send the file as it was.");
+    }
+    this.befores.set(entry.oid, object.data);
+    if (this.befores.size > 4) {
+      this.befores.delete(this.befores.keys().next().value!);
+    }
+    return object.data;
+  }
+
+  /** What a file of the vault holds now, or null if it is not there. */
+  async contentNow(path: string): Promise<Uint8Array | null> {
+    return this.common().fs.read(path);
+  }
+
+  /** Shows what changed in a file since the last sync. */
+  openDiff(change: LocalChange): void {
+    new DiffModal(this.app, this, change).open();
+  }
+
+  /**
    * The list of the plugins that are on is a file of the vault like any other,
    * and a sync takes the one of the repository. One that came from a device
    * without this plugin would turn it off when Obsidian starts again, and with
@@ -413,8 +559,7 @@ export default class PiecemealGitPlugin extends Plugin {
       }
       return null;
     }
-    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText } = this.config;
-    if (url === "") {
+    if (this.config.url === "") {
       if (!unasked) {
         new Notice("Give the address of the repository first.");
         this.openSettings();
@@ -431,53 +576,9 @@ export default class PiecemealGitPlugin extends Plugin {
     /** When the notice and the icon last said how far the sync is */
     let shownAt = 0;
     try {
-      const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
-      const fs = new VerifiedFs(
-        new ObsidianFs(
-          this.app.vault.adapter,
-          // A file that the remote removed goes where Obsidian puts the files that a person deletes
-          async (path) => {
-            const file = this.app.vault.getAbstractFileByPath(path);
-            if (!(file instanceof TFile)) {
-              return false;
-            }
-            await this.app.fileManager.trashFile(file);
-            return true;
-          },
-          // Obsidian keeps the size and time of every note in mind, which saves a look at the disk for each
-          (path) => {
-            const file = this.app.vault.getAbstractFileByPath(path);
-            return file instanceof TFile ? { size: file.stat.size, mtime: file.stat.mtime } : null;
-          },
-        ),
-      );
-      const remote = remoteOf(url, token);
-      const github = parseGitHub(remote.url);
-      const { configDir } = this.app.vault;
-      // What stays on the device: the settings of this plugin, the trash of Obsidian, and the files in
-      // which Obsidian keeps what is open on this device, which change whenever a note is opened
-      const own = new Set([`${configDir}/plugins/${this.manifest.id}/data.json`, `${configDir}/workspace.json`, `${configDir}/workspace-mobile.json`]);
-      const from = device !== "" ? device : Platform.isTablet ? "a tablet" : Platform.isMobile ? "a phone" : "a computer";
+      const { fs, options } = this.common();
       const result = await sync({
-        fs,
-        http: obsidianHttp,
-        remote,
-        branch: branch === "" ? undefined : branch,
-        storeDir: STORE_DIR,
-        exclude: (path) => own.has(path) || path === ".trash" || path.startsWith(".trash/"),
-        author: {
-          name: authorName !== "" ? authorName : "piecemeal-git",
-          email: authorEmail !== "" ? authorEmail : "piecemeal-git@users.noreply.github.com",
-        },
-        message: () => `Sync from ${from}`,
-        // An iPhone, an iPad and a Mac keep the letters of a name like "한글.md" in parts
-        composeNames: Platform.isIosApp || Platform.isMacOS,
-        mergeText,
-        maxFileBytes: maxFileMB * MB,
-        batchBytes: BATCH_BYTES,
-        wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
-        sizes: github === null ? undefined : githubSizes(obsidianHttp, github, token),
-        largeBlob: github === null ? undefined : githubLargeBlob(obsidianHttp, fs, github, token, BATCH_BYTES),
+        ...options,
         onProgress: (progress) => {
           this.progress = progress;
           // Told for every file. What is shown follows a few times a second, which is all that an eye takes in.
@@ -508,7 +609,12 @@ export default class PiecemealGitPlugin extends Plugin {
       this.lastResult = result;
       await this.stayOn(result);
       const toLookAt = concerns(result);
-      this.last = { at: Date.now(), ok: true, text: [headline(result), ...notes(result), ...restart(result, configDir), ...toLookAt].join(" "), attention: toLookAt.length > 0 };
+      this.last = {
+        at: Date.now(),
+        ok: true,
+        text: [headline(result), ...notes(result), ...restart(result, this.app.vault.configDir), ...toLookAt].join(" "),
+        attention: toLookAt.length > 0,
+      };
       this.failedUnasked = false;
       waiting?.hide();
       this.tell(result, unasked);
@@ -538,6 +644,8 @@ export default class PiecemealGitPlugin extends Plugin {
       this.progress = null;
       // Draws every report anew as well
       this.saveState();
+      // What was sent is no change any more, and what was taken is none either
+      void this.look();
     }
   }
 }
