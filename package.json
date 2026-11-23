@@ -1,6 +1,6 @@
 {
   "name": "piecemeal-git",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Obsidian plugin that syncs a vault with a git repository in small pieces, so that it works on a phone",
   "private": true,
   "type": "module",
