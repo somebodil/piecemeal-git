@@ -49,46 +49,46 @@
   margin-top: var(--size-4-2);
 }
 
-/* The dialogs. */
-.piecemeal-git-modal .piecemeal-git-note {
+/* The dialogs, and the panel of the sidebar. */
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-note {
   color: var(--text-muted);
   font-size: var(--font-ui-small);
   margin: var(--size-2-2) 0;
 }
 
-.piecemeal-git-modal .piecemeal-git-failed-text {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-failed-text {
   color: var(--text-error);
 }
 
-.piecemeal-git-modal .piecemeal-git-path {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-path {
   word-break: break-word;
 }
 
-.piecemeal-git-modal .piecemeal-git-label {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-label {
   color: var(--text-muted);
 }
 
-.piecemeal-git-modal details {
+:is(.piecemeal-git-modal, .piecemeal-git-view) details {
   margin: var(--size-2-2) 0;
 }
 
-.piecemeal-git-modal summary {
+:is(.piecemeal-git-modal, .piecemeal-git-view) summary {
   cursor: var(--cursor);
   padding: var(--size-2-2) 0;
 }
 
-.piecemeal-git-modal details ul {
+:is(.piecemeal-git-modal, .piecemeal-git-view) details ul {
   margin: 0;
   padding-inline-start: var(--size-4-6);
   max-height: 40vh;
   overflow-y: auto;
 }
 
-.piecemeal-git-modal .piecemeal-git-plan {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-plan {
   padding-inline-start: var(--size-4-5);
 }
 
-.piecemeal-git-modal .piecemeal-git-plan > li {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-plan > li {
   margin: var(--size-4-2) 0;
 }
 
@@ -112,6 +112,15 @@
   flex: 1 1 0;
 }
 
-.piecemeal-git-modal .piecemeal-git-state {
+:is(.piecemeal-git-modal, .piecemeal-git-view) .piecemeal-git-state {
   margin-bottom: var(--size-4-2);
+}
+
+/* The panel of the sidebar: how far a sync is, in a line that holds its place also when it says nothing. */
+.piecemeal-git-progress {
+  min-height: 1lh;
+}
+
+.piecemeal-git-view .piecemeal-git-buttons {
+  justify-content: flex-start;
 }

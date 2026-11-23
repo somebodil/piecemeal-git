@@ -1,11 +1,11 @@
-import { Notice, Platform, Plugin, setIcon, TFile } from "obsidian";
+import { Notice, Platform, Plugin, setIcon, type TAbstractFile, TFile, type WorkspaceLeaf } from "obsidian";
 import { VerifiedFs } from "./git/fs.ts";
 import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { remoteOf } from "./git/protocol.ts";
 import { CancelledError, type Progress, sync, type SyncResult } from "./git/sync.ts";
 import { ObsidianFs, obsidianHttp } from "./platform/obsidian.ts";
 import { ConfirmModal } from "./ui/confirm.ts";
-import { conflictCopies, ReportModal } from "./ui/report.ts";
+import { conflictCopies, isCopy, type Report, ReportModal, SyncView, VIEW_TYPE } from "./ui/report.ts";
 import { DEFAULTS, type Settings, SettingsTab } from "./ui/settings.ts";
 import { ago, concerns, explain, headline, notes, progressText, restart, worthAsking } from "./ui/words.ts";
 
@@ -44,17 +44,59 @@ export default class PiecemealGitPlugin extends Plugin {
   private ribbonEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private report: ReportModal | null = null;
-  /** How many files of the vault have a copy from the other side beside them, as of the last look */
-  private copies = 0;
+  /**
+   * The paths of the copies that syncs put beside files that both sides
+   * changed. Looked for once among all files of the vault, and kept up from
+   * then on by what Obsidian tells about files that come and go.
+   */
+  readonly copies = new Set<string>();
+  /** True once the panel was put into a sidebar. It is put there once: who closes it does not get it back. */
+  private panelPlaced = false;
 
   override async onload(): Promise<void> {
-    const data = ((await this.loadData()) ?? {}) as Partial<Settings> & { last?: Last | null };
-    const { last, ...config } = data;
+    const data = ((await this.loadData()) ?? {}) as Partial<Settings> & { last?: Last | null; panelPlaced?: boolean };
+    const { last, panelPlaced, ...config } = data;
     this.config = { ...DEFAULTS, ...config };
     this.last = last ?? null;
+    this.panelPlaced = panelPlaced === true;
     this.addSettingTab(new SettingsTab(this.app, this));
     this.schedule();
+    this.registerView(VIEW_TYPE, (leaf) => new SyncView(leaf, this));
     this.app.workspace.onLayoutReady(() => {
+      for (const path of conflictCopies(this.app)) {
+        this.copies.add(path);
+      }
+      // Only from here on: while Obsidian opens a vault it tells of every file as one that was made
+      /** Shows that a copy came or went. While a sync runs, all is drawn anew when it ends. */
+      const changed = (): void => {
+        this.refresh();
+        if (!this.running) {
+          this.redraw();
+        }
+      };
+      const gone = (file: TAbstractFile): void => {
+        if (this.copies.delete(file.path)) {
+          changed();
+        }
+      };
+      const came = (file: TAbstractFile): void => {
+        if (file instanceof TFile && isCopy(file.path)) {
+          this.copies.add(file.path);
+          changed();
+        }
+      };
+      this.registerEvent(this.app.vault.on("create", came));
+      this.registerEvent(this.app.vault.on("delete", gone));
+      this.registerEvent(
+        this.app.vault.on("rename", (file, before) => {
+          if (this.copies.delete(before)) {
+            changed();
+          }
+          came(file);
+        }),
+      );
+      this.refresh();
+      void this.placePanel();
       if (this.config.onStart) {
         void this.sync(true);
       }
@@ -71,6 +113,13 @@ export default class PiecemealGitPlugin extends Plugin {
       name: "Show what the last sync did",
       callback: () => {
         this.openReport();
+      },
+    });
+    this.addCommand({
+      id: "panel",
+      name: "Open the panel in the sidebar",
+      callback: () => {
+        void this.openPanel();
       },
     });
     this.ribbonEl = this.addRibbonIcon("refresh-cw", "Sync with the repository", () => {
@@ -91,8 +140,62 @@ export default class PiecemealGitPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData({ ...this.config, last: this.last });
+    await this.saveData({ ...this.config, last: this.last, panelPlaced: this.panelPlaced });
     this.refresh();
+  }
+
+  /**
+   * Puts the panel into the right sidebar the first time the plugin runs in
+   * a vault, without opening the sidebar. Its icon is then among the tabs
+   * there, also where the ribbon is hidden or folded into a menu.
+   */
+  private async placePanel(): Promise<void> {
+    if (this.panelPlaced) {
+      return;
+    }
+    if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length === 0) {
+      await this.app.workspace.getRightLeaf(false)?.setViewState({ type: VIEW_TYPE, active: false });
+    }
+    this.panelPlaced = true;
+    await this.saveSettings();
+  }
+
+  /** Shows the panel, and puts it into the right sidebar first if it is in neither. */
+  async openPanel(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null;
+    if (leaf === null) {
+      leaf = workspace.getRightLeaf(false);
+      await leaf?.setViewState({ type: VIEW_TYPE, active: true });
+    }
+    if (leaf !== null) {
+      await workspace.revealLeaf(leaf);
+    }
+  }
+
+  /** The reports that are on the screen: the panels of the sidebars, and the dialog while it is open. */
+  private reports(): Report[] {
+    const shown: Report[] = [];
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      // A panel that was not looked at yet is not made yet
+      if (leaf.view instanceof SyncView) {
+        shown.push(leaf.view.report);
+      }
+    }
+    if (this.report !== null) {
+      shown.push(this.report.report);
+    }
+    return shown;
+  }
+
+  /** Draws every report anew: after a sync started or ended, and after a copy was done with. */
+  redraw(): void {
+    for (const report of this.reports()) {
+      report.render();
+    }
+    if (this.running) {
+      this.refresh();
+    }
   }
 
   /** Starts the timer over. Called when the plugin loads and when the minutes change. */
@@ -111,8 +214,13 @@ export default class PiecemealGitPlugin extends Plugin {
   openReport(): void {
     // One at a time: asked for twice, it is the same list, not one on top of the other
     this.report?.close();
-    this.report = new ReportModal(this.app, this);
-    this.report.open();
+    const report = new ReportModal(this.app, this, () => {
+      if (this.report === report) {
+        this.report = null;
+      }
+    });
+    this.report = report;
+    report.open();
   }
 
   /** Opens the settings of Obsidian at the tab of this plugin. */
@@ -126,10 +234,6 @@ export default class PiecemealGitPlugin extends Plugin {
   /** Brings the icon of the ribbon and the status bar up to what is known. */
   private refresh(): void {
     const { last } = this;
-    // A look at every name of the vault. Not while a sync runs: it asks for this many times a second.
-    if (!this.running) {
-      this.copies = conflictCopies(this.app).length;
-    }
     let icon = "refresh-cw";
     let words = "Not synced yet";
     if (this.running) {
@@ -140,7 +244,7 @@ export default class PiecemealGitPlugin extends Plugin {
       if (!last.ok) {
         icon = "alert-triangle";
         words = `Sync failed ${ago(last.at)}`;
-      } else if (last.attention || this.copies > 0) {
+      } else if (last.attention || this.copies.size > 0) {
         icon = "alert-circle";
         words = `Synced ${ago(last.at)}, with something to look at`;
       } else {
@@ -163,6 +267,11 @@ export default class PiecemealGitPlugin extends Plugin {
       this.statusEl.toggleClass("piecemeal-git-syncing", this.running);
       this.statusEl.createSpan({ text: words.replace(/^Syncing… /, "") });
       this.statusEl.setAttribute("aria-label", "Show what the last sync did");
+    }
+    if (this.running) {
+      for (const report of this.reports()) {
+        report.progress(words);
+      }
     }
   }
 
@@ -215,7 +324,7 @@ export default class PiecemealGitPlugin extends Plugin {
         await adapter.write(path, JSON.stringify([...(on as unknown[]), this.manifest.id], null, 2));
       }
     } catch (error) {
-      console.error("Piecemeal Git: the list of plugins could not be read", error);
+      console.error("piecemeal-git: the list of plugins could not be read", error);
     }
   }
 
@@ -243,6 +352,7 @@ export default class PiecemealGitPlugin extends Plugin {
     this.running = true;
     this.progress = null;
     this.refresh();
+    this.redraw();
     let waiting = unasked ? null : new Notice("Syncing…", 0);
     /** True if a sync that nobody asked for stopped because a person should see first what it is about to do */
     let held = false;
@@ -284,7 +394,7 @@ export default class PiecemealGitPlugin extends Plugin {
         storeDir: STORE_DIR,
         exclude: (path) => own.has(path) || path === ".trash" || path.startsWith(".trash/"),
         author: {
-          name: authorName !== "" ? authorName : "Piecemeal Git",
+          name: authorName !== "" ? authorName : "piecemeal-git",
           email: authorEmail !== "" ? authorEmail : "piecemeal-git@users.noreply.github.com",
         },
         message: () => `Sync from ${from}`,
@@ -342,7 +452,7 @@ export default class PiecemealGitPlugin extends Plugin {
         this.failedUnasked = held;
         return null;
       }
-      console.error("Piecemeal Git: the sync failed", error);
+      console.error("piecemeal-git: the sync failed", error);
       const why = explain(error);
       this.last = { at: Date.now(), ok: false, text: why, attention: true };
       if (!unasked || !this.failedUnasked) {
@@ -354,6 +464,7 @@ export default class PiecemealGitPlugin extends Plugin {
       this.running = false;
       this.progress = null;
       await this.saveSettings();
+      this.redraw();
     }
   }
 }

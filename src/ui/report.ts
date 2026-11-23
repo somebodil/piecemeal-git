@@ -1,49 +1,47 @@
-import { type App, ButtonComponent, Modal, Notice, TFile, TFolder } from "obsidian";
+import { type App, ButtonComponent, ItemView, Modal, Notice, TFile, TFolder, type WorkspaceLeaf } from "obsidian";
 import type PiecemealGitPlugin from "../main.ts";
 import { ago, headline } from "./words.ts";
 
 /** What marks the name of the copy that a sync puts beside a file that both sides changed. */
 const COPY = / \(conflict \d{4}-\d{2}-\d{2} \d{4}(?: \d+)?\)(?=(?:\.[^./]*)?$)/;
 
-interface Copy {
-  /**
-   * The version of this device of a file that both sides changed. Beside a
-   * folder it is a file of the repository that has the name of the folder.
-   */
-  copy: TFile;
-  /** The path of the file that it is a copy beside */
-  original: string;
+/** True for the path of a copy that a sync put beside a file that both sides changed. */
+export function isCopy(path: string): boolean {
+  // Most paths have no bracket at all, and a look for one costs far less than the pattern
+  return path.includes(" (conflict ") && COPY.test(path);
 }
 
-/** The copies of the vault that wait for a person to choose. */
-export function conflictCopies(app: App): Copy[] {
-  return app.vault
-    .getFiles()
-    .filter((file) => COPY.test(file.path))
-    .map((file) => ({ copy: file, original: file.path.replace(COPY, "") }))
-    .sort((a, b) => a.original.localeCompare(b.original));
+/** The paths of the copies among the files of the vault. */
+export function conflictCopies(app: App): string[] {
+  const copies: string[] = [];
+  for (const file of app.vault.getFiles()) {
+    if (isCopy(file.path)) {
+      copies.push(file.path);
+    }
+  }
+  return copies;
 }
 
 /**
- * What the last sync did, file by file, and the copies that wait to be
- * looked at, each with the two ways to be done with it.
+ * The state of the sync, drawn into an element: how the last sync went, a
+ * button that starts one, the copies that wait to be looked at, each with the
+ * two ways to be done with it, and what the last sync did, file by file.
+ * The dialog and the panel of the sidebar show the same.
  */
-export class ReportModal extends Modal {
+export class Report {
+  private readonly app: App;
   private readonly plugin: PiecemealGitPlugin;
+  private readonly el: HTMLElement;
+  /** Called before a file is opened, so that what covers it can make way */
+  private readonly leave: () => void;
+  /** Where it says how far a sync is. Null until the report is drawn. */
+  private progressEl: HTMLElement | null = null;
 
-  constructor(app: App, plugin: PiecemealGitPlugin) {
-    super(app);
+  constructor(app: App, plugin: PiecemealGitPlugin, el: HTMLElement, leave: () => void) {
+    this.app = app;
     this.plugin = plugin;
-  }
-
-  override onOpen(): void {
-    this.modalEl.addClass("piecemeal-git-modal");
-    this.setTitle("Sync with the repository");
-    this.render();
-  }
-
-  override onClose(): void {
-    this.contentEl.empty();
+    this.el = el;
+    this.leave = leave;
   }
 
   /** A path that opens its file when it is one that Obsidian shows. */
@@ -52,7 +50,7 @@ export class ReportModal extends Modal {
     if (file instanceof TFile) {
       const link = parent.createEl("a", { text: path, cls: "piecemeal-git-path" });
       link.addEventListener("click", () => {
-        this.close();
+        this.leave();
         void this.app.workspace.getLeaf(false).openFile(file);
       });
     } else {
@@ -64,26 +62,40 @@ export class ReportModal extends Modal {
     if (paths.length === 0) {
       return;
     }
-    const details = this.contentEl.createEl("details", { cls: "piecemeal-git-section" });
+    const details = this.el.createEl("details", { cls: "piecemeal-git-section" });
     details.createEl("summary", { text: `${title} (${paths.length})` });
     if (note !== undefined) {
       details.createEl("p", { text: note, cls: "piecemeal-git-note" });
     }
-    const rows = details.createEl("ul");
-    for (const path of paths.slice(0, 500)) {
-      this.path(rows.createEl("li"), path);
-    }
-    if (paths.length > 500) {
-      rows.createEl("li", { text: `and ${paths.length - 500} more` });
-    }
+    // A list of hundreds of files is made when it is looked at, and not with every sync
+    let filled = false;
+    details.addEventListener("toggle", () => {
+      if (filled || !details.open) {
+        return;
+      }
+      filled = true;
+      const rows = details.createEl("ul");
+      for (const path of paths.slice(0, 500)) {
+        this.path(rows.createEl("li"), path);
+      }
+      if (paths.length > 500) {
+        rows.createEl("li", { text: `and ${paths.length - 500} more` });
+      }
+    });
   }
 
-  private render(): void {
-    const { contentEl, plugin } = this;
-    contentEl.empty();
+  /** Says how far the sync is that runs. Costs one text, so it can be told often. */
+  progress(text: string): void {
+    this.progressEl?.setText(text);
+  }
+
+  /** Draws all of it anew. */
+  render(): void {
+    const { el, plugin } = this;
+    el.empty();
 
     const { last } = plugin;
-    const state = contentEl.createDiv({ cls: "piecemeal-git-state" });
+    const state = el.createDiv({ cls: "piecemeal-git-state" });
     if (plugin.config.url === "") {
       state.setText("No repository yet. Give its address in the settings.");
     } else if (last === null) {
@@ -93,30 +105,35 @@ export class ReportModal extends Modal {
       // What it did is told below, file by file. Why it failed is told nowhere else.
       state.createDiv({ text: last.ok && plugin.lastResult !== null ? headline(plugin.lastResult) : last.text, cls: "piecemeal-git-note" });
     }
-    const top = contentEl.createDiv({ cls: "piecemeal-git-buttons" });
+    this.progressEl = el.createDiv({ cls: "piecemeal-git-note piecemeal-git-progress" });
+    const top = el.createDiv({ cls: "piecemeal-git-buttons" });
     new ButtonComponent(top).setButtonText("Settings").onClick(() => {
-      this.close();
+      this.leave();
       plugin.openSettings();
     });
-    const again = new ButtonComponent(top)
+    new ButtonComponent(top)
       .setButtonText(plugin.running ? "Syncing…" : "Sync now")
       .setCta()
       .setDisabled(plugin.running || plugin.config.url === "")
-      .onClick(async () => {
-        again.setDisabled(true).setButtonText("Syncing…");
-        await plugin.sync();
-        this.render();
+      .onClick(() => {
+        // The plugin draws every report anew when a sync starts and when it ends
+        void plugin.sync();
       });
 
-    const copies = conflictCopies(this.app);
+    const copies = [...plugin.copies].sort((a, b) => a.localeCompare(b));
     if (copies.length > 0) {
-      contentEl.createEl("h4", { text: `Changed on both sides (${copies.length})` });
-      contentEl.createEl("p", {
+      el.createEl("h4", { text: `Changed on both sides (${copies.length})` });
+      el.createEl("p", {
         text: "Both this device and another one changed these files. The version of the repository took the name, and yours is beside it as a copy. Look at the two, then keep one.",
         cls: "piecemeal-git-note",
       });
-      for (const { copy, original } of copies) {
-        const box = contentEl.createDiv({ cls: "piecemeal-git-copy" });
+      for (const path of copies.slice(0, 200)) {
+        const copy = this.app.vault.getAbstractFileByPath(path);
+        if (!(copy instanceof TFile)) {
+          continue;
+        }
+        const original = path.replace(COPY, "");
+        const box = el.createDiv({ cls: "piecemeal-git-copy" });
         if (this.app.vault.getAbstractFileByPath(original) instanceof TFolder) {
           // A folder here and a file in the repository: the folder kept the name
           const folder = box.createDiv();
@@ -128,7 +145,7 @@ export class ReportModal extends Modal {
           const only = box.createDiv({ cls: "piecemeal-git-buttons" });
           new ButtonComponent(only).setButtonText("Remove the file").onClick(async () => {
             await this.app.fileManager.trashFile(copy);
-            this.render();
+            plugin.redraw();
           });
           continue;
         }
@@ -141,7 +158,7 @@ export class ReportModal extends Modal {
         const choice = box.createDiv({ cls: "piecemeal-git-buttons" });
         new ButtonComponent(choice).setButtonText("Keep the repository's").onClick(async () => {
           await this.app.fileManager.trashFile(copy);
-          this.render();
+          plugin.redraw();
         });
         new ButtonComponent(choice).setButtonText("Take mine back").onClick(async () => {
           const data = await this.app.vault.readBinary(copy);
@@ -155,15 +172,18 @@ export class ReportModal extends Modal {
             return;
           }
           await this.app.fileManager.trashFile(copy);
-          this.render();
+          plugin.redraw();
         });
+      }
+      if (copies.length > 200) {
+        el.createEl("p", { text: `And ${copies.length - 200} more. They show when these are done with.`, cls: "piecemeal-git-note" });
       }
     }
 
     const result = plugin.lastResult;
     if (result !== null) {
-      contentEl.createEl("h4", { text: "What the last sync did" });
-      const before = contentEl.childElementCount;
+      el.createEl("h4", { text: "What the last sync did" });
+      const before = el.childElementCount;
       this.section("Taken from the repository", result.downloaded);
       this.section("Replaced by the version of the repository", result.replaced, "This vault held them otherwise before its first sync. A note that gave way went where Obsidian puts files that you delete.");
       this.section("Sent to the repository", result.uploaded);
@@ -173,9 +193,73 @@ export class ReportModal extends Modal {
       this.section("Too large to send", [...result.tooLargeIgnored, ...result.tooLargeChanged], "Above the largest size of the settings. They stay in this vault.");
       this.section("Left out of this vault", [...result.tooLargeThere, ...result.sameName], "Too large to get on this device, or named like another file but for capital letters. They stay in the repository.");
       this.section("Left for the next sync", result.busy, "Changed while the sync ran, or could not be written.");
-      if (contentEl.childElementCount === before) {
-        contentEl.createEl("p", { text: "Nothing. The vault and the repository held the same files.", cls: "piecemeal-git-note" });
+      if (el.childElementCount === before) {
+        el.createEl("p", { text: "Nothing. The vault and the repository held the same files.", cls: "piecemeal-git-note" });
       }
     }
+  }
+}
+
+/** The report as a dialog. */
+export class ReportModal extends Modal {
+  readonly report: Report;
+  private readonly closed: () => void;
+
+  /** @param closed called when the dialog is gone from the screen */
+  constructor(app: App, plugin: PiecemealGitPlugin, closed: () => void) {
+    super(app);
+    this.report = new Report(app, plugin, this.contentEl, () => this.close());
+    this.closed = closed;
+  }
+
+  override onOpen(): void {
+    this.modalEl.addClass("piecemeal-git-modal");
+    this.setTitle("Sync with the repository");
+    this.report.render();
+  }
+
+  override onClose(): void {
+    this.contentEl.empty();
+    this.closed();
+  }
+}
+
+/** What Obsidian knows the panel by */
+export const VIEW_TYPE = "piecemeal-git";
+
+/**
+ * The report as a panel of a sidebar. Its icon stands among the tabs of the
+ * sidebar, where it is also seen with the ribbon hidden, and can be put into
+ * the other sidebar as any tab can.
+ */
+export class SyncView extends ItemView {
+  readonly report: Report;
+
+  constructor(leaf: WorkspaceLeaf, plugin: PiecemealGitPlugin) {
+    super(leaf);
+    this.report = new Report(this.app, plugin, this.contentEl, () => undefined);
+  }
+
+  override getViewType(): string {
+    return VIEW_TYPE;
+  }
+
+  override getDisplayText(): string {
+    return "piecemeal-git";
+  }
+
+  override getIcon(): string {
+    return "refresh-cw";
+  }
+
+  override onOpen(): Promise<void> {
+    this.contentEl.addClass("piecemeal-git-view");
+    this.report.render();
+    return Promise.resolve();
+  }
+
+  override onClose(): Promise<void> {
+    this.contentEl.empty();
+    return Promise.resolve();
   }
 }

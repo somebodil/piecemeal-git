@@ -1,4 +1,4 @@
-# Piecemeal Git
+# piecemeal-git
 
 An [Obsidian](https://obsidian.md) plugin that syncs a vault with a git repository, built to work on a phone.
 
@@ -10,7 +10,7 @@ It speaks the git protocol itself and needs no git program. What sets it apart i
 
 ## Installing
 
-In Obsidian, open the settings, go to "Community plugins", look for "Piecemeal Git", install it and turn it on. Then give it the address of a repository and a token, as told under "Trying it" below.
+In Obsidian, open the settings, go to "Community plugins", look for "piecemeal-git", install it and turn it on. Then give it the address of a repository and a token, as told under "Trying it" below.
 
 Try it on a copy of a vault first. It has run on an emulated phone, and on a device that a person holds in a hand only once: the first sync of a tablet.
 
@@ -60,6 +60,8 @@ The device keeps no commits of its own. A sync compares three things for each pa
 - A phone and most computers take `Note.md` and `note.md` for the same file, and git does not. A file of the repository whose path differs only in capital letters from one that the vault holds is left out of the vault, and you are told. It stays in the repository as it is. A name that changes only its capital letters, on either side, is a change of name like any other.
 - An iPhone, an iPad and a Mac keep a name like `한글.md` or `é.md` with each letter taken apart into its parts, whatever the name was written as, and git keeps a name as it is given. On those devices a file of the vault has the name that the repository has for it, and a new file is sent with the letters of its name in one piece, as git does on a Mac. So a name does not change in the repository by going through such a device.
 - A sync that finds nothing to do is short. For a note that Obsidian knows to be as it was, the disk is not asked. While the remote has not moved, its files are known from one file. On an emulated phone such a sync of a hundred notes took a tenth of a second.
+- What the vault has to be asked, it is asked a few things at once: which files a folder holds, how large a file is that Obsidian keeps no list of, what a file holds that is not as it was. A phone takes its time for each answer, whatever is asked, and the answers do not wait for one another. The asking starts while the remote is still asked where its branch is. Files are written one after the other, as before.
+- A file and a folder are asked for once, and a second time only when that fails, to tell one that is not there from one that cannot be read. A file that was written and looked at is not asked for its size again. A sync that changed nothing writes nothing: what was agreed on stays in its file as it is.
 - A note that is changed behind the back of Obsidian, by another app while Obsidian does not look, is sent once Obsidian has seen the change, which it does when it comes to the front again.
 - Every file that a sync writes is looked at afterwards, and written again if it does not have the size it should have. A file that cannot be written at all is taken out again and asked for by the next sync, so that a file that is cut off is never taken for a change of yours. A commit or a folder that the plugin kept and cannot read any more is asked for again.
 - A link of the repository is a file in the vault that holds where the link points. This is how git keeps a link where links cannot be made, as on a phone. It stays a link in the repository, also when you write another place into it. From a terminal the sync makes real links, and sends a link as a link, without going into a folder that it points to.
@@ -109,6 +111,7 @@ Try it on a copy of a vault first.
 ## What you see
 
 - While a sync runs, a notice says how far it is, and the icon of the ribbon turns. The desktop app also says it in the bar at the bottom, and there it says afterwards how long ago the last sync was.
+- The plugin has a panel in the right sidebar, with its icon among the tabs there. It is there also where the ribbon is hidden or folded into a menu, as on a phone and a tablet. The panel says how the last sync went and how far one is that runs, has a button that starts a sync, and lists what the dialog "Show what the last sync did" lists. It is put there once, the first time the plugin runs in a vault. You can drag it into the left sidebar or close it, and "Open the panel in the sidebar" brings it back.
 - A sync that went well says in a line what it took and sent, and the line goes away by itself. One that left something to look at stays until you close it, and has a button that shows the files. The icon then has a dot.
 - "Show what the last sync did" lists the files of the last sync by what was done with them, and a file opens when you press its name.
 - The same list shows every file of the vault that has a copy of your version beside it, with two buttons: "Keep the repository's" removes the copy, and "Take mine back" puts the copy in the place of the file. The next sync sends what you chose.
@@ -149,7 +152,8 @@ A release is made by a tag with the version of `manifest.json` as its name. GitH
 - `src/platform` holds how the plugin reads and writes files and talks to a server inside Obsidian.
 - `tests` holds what runs on Node.js only and is no part of the plugin: files and HTTP for the tests, the git server that they talk to, the script that syncs from a terminal, and file systems that play a phone: one that does not tell capital letters from small ones, one that takes the letters of a name apart, and one that loses a write now and then.
 - `src/main.ts` is the plugin: the commands, the icon, and what it tells you while a sync runs and after it.
-- `src/ui` holds the settings, the two dialogs, and the words that the plugin says. `styles.css` is how they look.
+- `src/ui` holds the settings, the two dialogs, the panel of the sidebar, and the words that the plugin says. `styles.css` is how they look.
+- `node tests/bench.ts [notes]` times the kinds of sync on a vault of that many notes, against the git server of the tests.
 
 ## License
 
