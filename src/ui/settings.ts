@@ -58,7 +58,7 @@ const GROUPS: { heading?: string; rows: Row[] }[] = [
         type: "toggle",
         key: "mergeText",
         name: "Put texts together",
-        desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, your version stays and the other one is kept beside it as a copy.",
+        desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, the version of the repository has the name and yours is kept beside it as a copy.",
       },
       {
         type: "number",
