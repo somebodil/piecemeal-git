@@ -71,6 +71,7 @@ console.log(
       merged: result.merged,
       conflicts: result.conflicts,
       later: result.later,
+      earlier: result.earlier,
       tooLargeIgnored: result.tooLargeIgnored,
       tooLargeChanged: result.tooLargeChanged,
       tooLargeThere: result.tooLargeThere,

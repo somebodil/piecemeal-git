@@ -62,6 +62,7 @@ describe("the words of the plugin", () => {
       merged: [],
       conflicts: [],
       later: [],
+      earlier: [],
       replaced: [],
       clashes: [],
       tooLargeIgnored: [],
@@ -71,13 +72,42 @@ describe("the words of the plugin", () => {
       busy: [],
       ...over,
     });
-    assert.match(concerns(result({ conflicts: [{ path: "a.md", copy: "a (conflict 2026-11-22 0915).md" }] }))[0], /^Changed on both sides: a\.md\. The version of the repository has the name now/);
-    // Where the later version kept the name, it says which one that was and where the other one is
-    const later = concerns(result({ later: [{ path: "a.md", kept: "here" }, { path: "b.md", kept: "there" }, { path: "c.md", kept: "there" }] }));
-    assert.deepEqual(later, [
-      "Changed on both sides, and yours is the later one: a.md. Yours keeps the name and was sent. The version of the repository is in its history.",
-      "Changed on both sides, and the repository's is the later one: b.md, c.md. The version of the repository has the name now, and yours went where Obsidian puts files that you delete.",
+    const copy = (name: string): string => `${name} (conflict 2026-11-22 0915).md`;
+    assert.deepEqual(concerns(result({ downloaded: ["a.md"], conflicts: [{ path: "a.md", copy: copy("a") }] })), [
+      "Changed on both sides: a.md. The version of the repository has the name now, and yours is kept beside it as a copy.",
     ]);
+    // Where the times told which version is the later one, it says which one that was, and where yours is
+    const later = concerns(
+      result({
+        downloaded: ["dir/b.md", "c.md", "d.md"],
+        conflicts: [
+          { path: "dir/b.md", copy: copy("dir/b") },
+          { path: "c.md", copy: copy("c") },
+          { path: "d.md", copy: copy("d") },
+        ],
+        later: [
+          { path: "a.md", kept: "here" },
+          { path: "dir/b.md", kept: "there", copy: copy("dir/b") },
+          { path: "c.md", kept: "there", copy: copy("c") },
+        ],
+      }),
+    );
+    assert.deepEqual(later, [
+      "Changed on both sides, and yours is the later one: a.md. Yours keeps the name and was sent. No copy was made: the version of the repository is in its history.",
+      "Changed on both sides, and the repository's is the later one: dir/b.md (yours is now b (conflict 2026-11-22 0915).md), c.md (yours is now c (conflict 2026-11-22 0915).md). The version of the repository has the name now, and yours is kept beside it as a copy.",
+      // A file of which both are kept without a word of the times is not said twice
+      "Changed on both sides: d.md. The version of the repository has the name now, and yours is kept beside it as a copy.",
+    ]);
+    // A version of the repository that did not get into the vault is not said to have the name
+    assert.deepEqual(concerns(result({ conflicts: [{ path: "big.png", copy: "big (conflict 2026-11-22 0915).png" }], later: [{ path: "big.png", kept: "there", copy: "big (conflict 2026-11-22 0915).png" }], tooLargeThere: ["big.png"] })), [
+      "Changed on both sides: big.png. Yours is kept as a copy beside it. The version of the repository did not get the name: it could not be put into the vault this time.",
+      "Too large to get on this device: big.png. The repository keeps its version, and this vault is left without it.",
+    ]);
+    assert.deepEqual(concerns(result({ downloaded: ["e.md"], earlier: ["e.md"] })), [
+      "Changed on both sides, and yours held what the repository held before: e.md. The version of the repository has the name now. No copy was made: what yours held is in the history of the repository.",
+    ]);
+    // Nothing of it says that a file went where deleted files go
+    assert.ok(!later.join(" ").includes("delete"));
     assert.match(concerns(result({ clashes: [{ path: "notes", copy: "notes (conflict 2026-11-22 0915)" }] }))[0], /What is here keeps the name/);
     assert.deepEqual(concerns(result({ replaced: ["a.md"] })), []);
     assert.match(notes(result({ replaced: ["a.md", "b.md"] }))[0], /replaced by its version: a\.md, b\.md\.$/);

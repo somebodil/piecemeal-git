@@ -23,13 +23,23 @@ interface Entry {
   resolved?: GitObject;
 }
 
+/** Thrown when a pack holds more than its reader was told to take. */
+export class TooLargeError extends Error {}
+
 /**
  * Reads every object of a pack. A delta against an object that is not in the
  * pack is looked up with `external`.
+ *
+ * @param most how many objects are read at most, and how many bytes they
+ *   hold at most once they are unpacked. A pack is small as it comes and can
+ *   be many times as large when it is read: a folder that changed in one
+ *   line comes as that line, and is read as the whole folder. A pack that
+ *   holds more is not read to its end, and a `TooLargeError` is thrown.
  */
 export async function parsePack(
   pack: Uint8Array,
   external?: (oid: string) => Promise<GitObject | null>,
+  most?: { objects: number; bytes: number },
 ): Promise<PackedObject[]> {
   if (pack.length < 32 || toHex(pack.subarray(0, 4)) !== "5041434b") {
     throw new Error("pack: no PACK header");
@@ -39,12 +49,19 @@ export async function parsePack(
     throw new Error("pack: not version 2");
   }
   const count = view.getUint32(8);
+  if (most !== undefined && count > most.objects) {
+    throw new TooLargeError(`pack: it holds ${count} objects, and ${most.objects} are taken at most`);
+  }
+  /** Tells that the pack holds more bytes than are taken. */
+  const tooMany = (): TooLargeError => new TooLargeError(`pack: its objects hold more than the ${most?.bytes} bytes that are taken at most`);
   if ((await sha1(pack.subarray(0, pack.length - 20))) !== toHex(pack.subarray(pack.length - 20))) {
     throw new Error("pack: the checksum does not match, the download is damaged");
   }
 
   const entries = new Map<number, Entry>();
   let pos = 12;
+  /** How many bytes the pack says that its objects hold as they are packed, a delta as the delta */
+  let promised = 0;
   for (let i = 0; i < count; i++) {
     const offset = pos;
     let byte = pack[pos++];
@@ -71,6 +88,11 @@ export async function parsePack(
     } else if (TYPE_OF[type] === undefined) {
       throw new Error(`pack: unknown object type ${type}`);
     }
+    promised += size;
+    if (most !== undefined && promised > most.bytes) {
+      // Seen before the bytes are made room for
+      throw tooMany();
+    }
     const inflated = inflateAt(pack, pos, size);
     entry.data = inflated.data;
     pos = inflated.end;
@@ -79,7 +101,13 @@ export async function parsePack(
 
   const byOid = new Map<string, GitObject>();
   const out: PackedObject[] = [];
+  /** How many bytes the objects hold that are read so far */
+  let read = 0;
   const finish = async (entry: Entry, object: GitObject): Promise<void> => {
+    read += object.data.length;
+    if (most !== undefined && read > most.bytes) {
+      throw tooMany();
+    }
     entry.resolved = object;
     const oid = await objectId(object);
     byOid.set(oid, object);

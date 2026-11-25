@@ -451,6 +451,30 @@ describe("sync", () => {
     assert.equal(w.readPc("a.md"), "a changed\n");
   });
 
+  it("leaves a file of the vault as it is when the remote made it too large to come, and does not send it back over that version", async () => {
+    const w = setup({ "a.md": "a\n", "grown.bin": Buffer.alloc(100, 0) });
+    await w.syncPhone();
+    w.commitThere({ "grown.bin": Buffer.alloc(50_000, 0) });
+    const sizeThere = (): string => server.git(path.basename(w.url), "cat-file", "-s", "main:grown.bin");
+    // Every sync says so, and none of them takes the old version of the vault for a change of this device
+    for (let n = 0; n < 2; n++) {
+      const result = await w.syncPhone();
+      assert.deepEqual([result.tooLargeThere, result.downloaded, result.uploaded], [["grown.bin"], [], []], `sync ${n}`);
+      assert.equal(readFileSync(path.join(w.phoneDir, "grown.bin")).length, 100);
+      assert.equal(sizeThere(), "50000");
+    }
+    // What the phone makes of the file later is a change of both sides, and both are kept
+    w.writePhone("grown.bin", Buffer.concat([Buffer.alloc(99, 0), Buffer.from([1])]));
+    const result = await w.syncPhone();
+    const copy = "grown (conflict 2026-11-22 0915).bin";
+    assert.deepEqual([result.conflicts, result.tooLargeThere, result.uploaded], [[{ path: "grown.bin", copy }], ["grown.bin"], [copy]]);
+    assert.equal(sizeThere(), "50000");
+    // Once the limit lets it in, the version of the remote comes
+    const raised = await w.syncPhone({ maxFileBytes: 100_000, batchBytes: 100_000 });
+    assert.deepEqual([raised.downloaded, raised.tooLargeThere], [["grown.bin"], []]);
+    assert.equal(readFileSync(path.join(w.phoneDir, "grown.bin")).length, 50_000);
+  });
+
   it("takes a file that was too large once the limit lets it in, and asks nothing about it until then", async () => {
     const w = setup({ "a.md": "a\n", "huge.bin": Buffer.alloc(50_000, 7) });
     const first = await w.syncPhone();
@@ -1444,17 +1468,24 @@ describe("sync", () => {
     });
   });
 
-  describe("when the later version of a file that both sides changed keeps the name", () => {
+  describe("when the version of the vault of a file that both sides changed keeps the name where it is the later one", () => {
     const at = (time: string): Date => new Date(`2026-03-01T${time}Z`);
-    /** The files of the phone, with a place for what is discarded, as Obsidian has its trash. */
-    const withTrash = (w: ReturnType<typeof setup>, keeps = true) => {
-      const fs = new NodeFs(w.phoneDir) as NodeFs & { discard?: (file: string) => Promise<void>; keeps?: (file: string) => boolean };
+    /** The present of the syncs of these tests, as `options` gives it */
+    const present = new Date(2026, 10, 22, 9, 15);
+    /** A file that is not a text, so that it is never put together. */
+    const bin = (byte: number, size = 11): Buffer => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, byte]), Buffer.alloc(Math.max(0, size - 6), byte)]);
+    const bytes = (dir: string, file: string): Buffer => readFileSync(path.join(dir, file));
+    /**
+     * The files of the phone, with a place for what is discarded, as Obsidian
+     * has its trash. Nothing of a file that both sides changed may go there.
+     */
+    const withTrash = (w: ReturnType<typeof setup>) => {
+      const fs = new NodeFs(w.phoneDir) as NodeFs & { discard?: (file: string) => Promise<void> };
       const trashed: Record<string, string | null> = {};
       fs.discard = async (file) => {
         trashed[file] = w.readPhone(file);
         await fs.remove(file);
       };
-      fs.keeps = () => keeps;
       return { fs, trashed };
     };
     /** Requests as they are, with a count of how many times the server was asked for commits further back. */
@@ -1466,77 +1497,83 @@ describe("sync", () => {
         }
         return nodeHttp(request);
       };
+    const copyOf = (file: string): string => file.replace(/(\.[^./]*)?$/, " (conflict 2026-11-22 0915)$1");
 
     it("keeps the version of the vault when that is the later one, and sends it", async () => {
       const w = setup({ "note.md": "start\n", "dir/other.md": "other\n" });
       await w.syncPhone();
-      w.commitThere({ "note.md": "the computer's\n", "new.md": "new on the computer\n" }, "from the computer", at("10:00:00"));
+      w.commitThere({ "note.md": "the computer's\n" }, "from the computer", at("10:00:00"));
       w.commitThere({ "dir/other.md": "other, changed\n" }, "something else", at("10:30:00"));
       w.writePhone("note.md", "the phone's\n", at("10:05:00"));
-      // A file that both sides made since the last sync is held against the commit that made it, too
-      w.writePhone("new.md", "new on the phone\n", at("10:00:01"));
       const { fs, trashed } = withTrash(w);
       const result = await w.syncPhone({ fs, onConflict: "later" });
 
-      assert.deepEqual(
-        result.later.sort((a, b) => a.path.localeCompare(b.path)),
-        [
-          { path: "new.md", kept: "here" },
-          { path: "note.md", kept: "here" },
-        ],
-      );
-      assert.deepEqual([result.conflicts, result.merged, result.downloaded, trashed], [[], [], ["dir/other.md"], {}]);
-      assert.deepEqual(result.uploaded.sort(), ["new.md", "note.md"]);
-      assert.deepEqual([w.readPhone("note.md"), w.readPhone("new.md")], ["the phone's\n", "new on the phone\n"]);
-      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "dir", "new.md", "note.md"]);
+      assert.deepEqual(result.later, [{ path: "note.md", kept: "here" }]);
+      assert.deepEqual([result.conflicts, result.earlier, result.merged, result.downloaded, trashed], [[], [], [], ["dir/other.md"], {}]);
+      assert.deepEqual(result.uploaded, ["note.md"]);
+      assert.equal(w.readPhone("note.md"), "the phone's\n");
+      // No copy was made
+      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "dir", "note.md"]);
       w.pullPc();
-      assert.deepEqual([w.readPc("note.md"), w.readPc("new.md")], ["the phone's\n", "new on the phone\n"]);
+      assert.equal(w.readPc("note.md"), "the phone's\n");
       // What the computer made of it is in the history of the repository
       assert.deepEqual(w.log(), ["from the phone", "something else", "from the computer", "first"]);
-      assert.equal(server.git(path.basename(w.url), "show", "main~1:note.md"), "the computer's");
+      assert.equal(server.git(path.basename(w.url), "show", "main~2:note.md"), "the computer's");
       assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
 
       const again = await w.syncPhone({ fs, onConflict: "later" });
       assert.deepEqual([again.later, again.conflicts, again.downloaded, again.uploaded], [[], [], [], []]);
     });
 
-    it("takes the version of the remote when that is the later one, and puts the one of the vault where a person can get it back", async () => {
-      const w = setup({ "note.md": "start\n" });
-      await w.syncPhone();
-      w.commitThere({ "note.md": "the computer's\n" }, "from the computer", at("10:05:00"));
-      w.writePhone("note.md", "the phone's\n", at("10:00:00"));
-      const { fs, trashed } = withTrash(w);
-      const result = await w.syncPhone({ fs: new VerifiedFs(fs), onConflict: "later" });
-
-      assert.deepEqual(result.later, [{ path: "note.md", kept: "there" }]);
-      assert.deepEqual([result.conflicts, result.downloaded, result.uploaded], [[], ["note.md"], []]);
-      assert.deepEqual(trashed, { "note.md": "the phone's\n" });
-      assert.equal(w.readPhone("note.md"), "the computer's\n");
-      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "note.md"]);
-      // Nothing of the phone went to the repository
-      assert.deepEqual(w.log(), ["from the computer", "first"]);
-
+    it("takes the version of the remote when that is the later one, and keeps the one of the vault beside it as a copy, as it does when it is told to keep both", async () => {
+      /** The same files on both sides, synced as the sync is told to. */
+      const run = async (onConflict: "later" | "both") => {
+        const w = setup({ "note.md": "start\n", "pic.png": bin(1) });
+        await w.syncPhone();
+        w.commitThere({ "note.md": "the computer's\n", "pic.png": bin(2) }, "from the computer", at("10:05:00"));
+        w.writePhone("note.md", "the phone's\n", at("10:00:00"));
+        w.writePhone("pic.png", bin(3), at("10:00:00"));
+        const { fs, trashed } = withTrash(w);
+        const result = await w.syncPhone({ fs: new VerifiedFs(fs), onConflict });
+        const tree = server.git(path.basename(w.url), "ls-tree", "-r", "main");
+        return { w, fs, result, trashed, tree };
+      };
+      const { w, fs, result, trashed, tree } = await run("later");
+      const copies = [copyOf("note.md"), copyOf("pic.png")];
+      assert.deepEqual(
+        result.later.sort((a, b) => a.path.localeCompare(b.path)),
+        [
+          { path: "note.md", kept: "there", copy: copies[0] },
+          { path: "pic.png", kept: "there", copy: copies[1] },
+        ],
+      );
+      assert.deepEqual(
+        result.conflicts.sort((a, b) => a.path.localeCompare(b.path)),
+        [
+          { path: "note.md", copy: copies[0] },
+          { path: "pic.png", copy: copies[1] },
+        ],
+      );
+      assert.deepEqual([result.downloaded.sort(), result.uploaded.sort(), result.earlier], [["note.md", "pic.png"], copies, []]);
+      // Nothing went where deleted files go: the version of the phone is in the vault, beside the file
+      assert.deepEqual(trashed, {});
+      assert.deepEqual([w.readPhone("note.md"), w.readPhone(copies[0])], ["the computer's\n", "the phone's\n"]);
+      assert.deepEqual([bytes(w.phoneDir, "pic.png"), bytes(w.phoneDir, copies[1])], [bin(2), bin(3)]);
+      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", ...copies, "note.md", "pic.png"].sort());
+      // And in the repository
+      w.pullPc();
+      assert.deepEqual([w.readPc("note.md"), w.readPc(copies[0])], ["the computer's\n", "the phone's\n"]);
+      assert.deepEqual([bytes(w.pcDir, "pic.png"), bytes(w.pcDir, copies[1])], [bin(2), bin(3)]);
+      assert.deepEqual(w.log(), ["from the phone", "from the computer", "first"]);
+      assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
       const again = await w.syncPhone({ fs, onConflict: "later" });
       assert.deepEqual([again.later, again.conflicts, again.downloaded, again.uploaded], [[], [], [], []]);
-    });
 
-    it("keeps the version of the vault as a copy when the one of the remote is later and there is no place to put it", async () => {
-      const w = setup({ "a.md": "start\n", "b.md": "start\n" });
-      await w.syncPhone();
-      w.commitThere({ "a.md": "the computer's a\n", "b.md": "the computer's b\n" }, "from the computer", at("10:05:00"));
-      w.writePhone("a.md", "the phone's a\n", at("10:00:00"));
-      w.writePhone("b.md", "the phone's b\n", at("10:00:00"));
-      // Files that know no place for what is discarded, as from a terminal
-      const first = await w.syncPhone({ onConflict: "later", exclude: (file) => file.startsWith("b") });
-      const copy = "a (conflict 2026-11-22 0915).md";
-      assert.deepEqual([first.later, first.conflicts], [[], [{ path: "a.md", copy }]]);
-      assert.deepEqual([w.readPhone("a.md"), w.readPhone(copy)], ["the computer's a\n", "the phone's a\n"]);
-      // A place that keeps nothing, as when Obsidian is told to delete for good
-      const { fs, trashed } = withTrash(w, false);
-      const second = await w.syncPhone({ fs, onConflict: "later" });
-      const other = "b (conflict 2026-11-22 0915).md";
-      assert.deepEqual([second.later, second.conflicts, trashed], [[], [{ path: "b.md", copy: other }], {}]);
-      assert.deepEqual([w.readPhone("b.md"), w.readPhone(other)], ["the computer's b\n", "the phone's b\n"]);
+      // Told to keep both, the sync leaves the same files on both sides. It only does not say which was later.
+      const both = await run("both");
+      assert.deepEqual([both.result.later, both.result.conflicts.length, both.trashed], [[], 2, {}]);
+      assert.equal(both.tree, tree);
+      assert.deepEqual(readdirSync(both.w.phoneDir).sort(), readdirSync(w.phoneDir).sort());
     });
 
     it("keeps both where the two were changed in the same second", async () => {
@@ -1546,35 +1583,52 @@ describe("sync", () => {
       w.writePhone("note.md", "the phone's\n", at("10:00:00.900"));
       const { fs, trashed } = withTrash(w);
       const result = await w.syncPhone({ fs, onConflict: "later" });
-      const copy = "note (conflict 2026-11-22 0915).md";
+      const copy = copyOf("note.md");
       assert.deepEqual([result.later, result.conflicts, trashed], [[], [{ path: "note.md", copy }], {}]);
       assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's\n", "the phone's\n"]);
       assert.deepEqual(result.uploaded, [copy]);
     });
 
-    it("keeps both where it is not known when the remote changed the file", async () => {
-      const w = setup({ "note.md": "start\n" });
-      await w.syncPhone();
-      // The commit before the one that changed the file is not on the phone, so the server has to be asked
-      w.commitThere({ "between.md": "between\n" }, "something else", at("09:00:00"));
-      w.commitThere({ "note.md": "the computer's\n" }, "from the computer", at("10:00:00"));
-      w.writePhone("note.md", "the phone's\n", at("10:05:00"));
-      const { fs, trashed } = withTrash(w);
-      const said: string[] = [];
-      const result = await w.syncPhone({
-        fs,
-        onConflict: "later",
-        // A host that does not answer, and a server that gives no commits further back
-        changedAt: () => Promise.reject(new Error("no answer")),
-        http: async (request) =>
-          request.body !== undefined && Buffer.from(request.body).includes("deepen 16") ? { status: 500, headers: {}, body: new Uint8Array(0) } : nodeHttp(request),
-        log: (message) => said.push(message),
-      });
-      const copy = "note (conflict 2026-11-22 0915).md";
-      assert.deepEqual([result.later, result.conflicts, trashed], [[], [{ path: "note.md", copy }], {}]);
-      assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's\n", "the phone's\n"]);
-      assert.ok(said.some((line) => line.includes("the host did not tell when note.md was changed (no answer)")));
-      assert.ok(said.some((line) => line.includes("is not known")));
+    it("keeps both where it is not known when the remote changed the file, and goes on whatever goes wrong with the asking", async () => {
+      const text = (second: string, last: string): string => `# Title\n${second}\nthree\nfour\nfive\n${last}\n`;
+      /** A server that answers the request for commits further back as `deepen` says. */
+      const run = async (deepen: () => ReturnType<SyncOptions["http"]>) => {
+        const w = setup({ "note.md": "start\n", "apart.md": text("two", "six") });
+        await w.syncPhone();
+        // The commit before the one that changed the file is not on the phone, so the server has to be asked
+        w.commitThere({ "between.md": "between\n" }, "something else", at("09:00:00"));
+        w.commitThere({ "note.md": "the computer's\n", "apart.md": text("two from the computer", "six") }, "from the computer", at("10:00:00"));
+        w.writePhone("note.md", "the phone's\n", at("10:05:00"));
+        w.writePhone("apart.md", text("two", "six from the phone"), at("10:05:00"));
+        const { fs, trashed } = withTrash(w);
+        const said: string[] = [];
+        const result = await w.syncPhone({
+          fs,
+          onConflict: "later",
+          // A host that does not answer
+          changedAt: () => Promise.reject(new Error("no answer")),
+          http: (request) => (request.body !== undefined && Buffer.from(request.body).includes("deepen 16") ? deepen() : nodeHttp(request)),
+          log: (message) => said.push(message),
+        });
+        const copy = copyOf("note.md");
+        assert.deepEqual([result.later, result.conflicts, trashed], [[], [{ path: "note.md", copy }], {}]);
+        assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's\n", "the phone's\n"]);
+        // The text that was put together before the times were asked for is sent all the same
+        assert.deepEqual(result.merged, ["apart.md"]);
+        assert.deepEqual(result.uploaded.sort(), [copy, "apart.md"].sort());
+        w.pullPc();
+        assert.equal(w.readPc("apart.md"), text("two from the computer", "six from the phone"));
+        assert.ok(said.some((line) => line.includes("the host did not tell when note.md was changed (no answer)")));
+        assert.ok(said.some((line) => line.includes("is not known")));
+        return said;
+      };
+      // A server that gives no commits further back
+      await run(() => Promise.resolve({ status: 500, headers: {}, body: new Uint8Array(0) }));
+      // No network at that moment, which is no answer of a server at all
+      const said = await run(() => Promise.reject(new Error("the network is gone")));
+      assert.ok(said.some((line) => line.includes("the network is gone")));
+      // An answer that is not what git sends
+      await run(() => Promise.resolve({ status: 200, headers: {}, body: Buffer.from("<html>not here</html>") }));
     });
 
     it("takes the word of the host for when the remote changed a file, and asks the server only where the host does not tell", async () => {
@@ -1600,15 +1654,16 @@ describe("sync", () => {
       });
       assert.deepEqual(asked, [`a.md ${tip}`, `b.md ${tip}`]);
       assert.equal(counted.n, 1);
+      const copy = copyOf("a.md");
       assert.deepEqual(
         result.later.sort((a, b) => a.path.localeCompare(b.path)),
         [
-          { path: "a.md", kept: "there" },
+          { path: "a.md", kept: "there", copy },
           { path: "b.md", kept: "here" },
         ],
       );
-      assert.deepEqual(trashed, { "a.md": "the phone's a\n" });
-      assert.deepEqual([w.readPhone("a.md"), w.readPhone("b.md")], ["the computer's a\n", "the phone's b\n"]);
+      assert.deepEqual([result.conflicts, trashed], [[{ path: "a.md", copy }], {}]);
+      assert.deepEqual([w.readPhone("a.md"), w.readPhone(copy), w.readPhone("b.md")], ["the computer's a\n", "the phone's a\n", "the phone's b\n"]);
     });
 
     it("still puts a text together where that works out, whichever version is later", async () => {
@@ -1662,43 +1717,122 @@ describe("sync", () => {
         http: counting(counted),
         changedAt: () => Promise.resolve(++hostAsked),
       });
-      const copy = "note (conflict 2026-11-22 0915).md";
+      const copy = copyOf("note.md");
       assert.deepEqual([result.later, result.conflicts, trashed, counted.n, hostAsked], [[], [{ path: "note.md", copy }], {}, 0, 0]);
       assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's\n", "the phone's\n"]);
       assert.deepEqual(result.uploaded, [copy]);
     });
 
     it("goes by the times for a file that is not a text as well", async () => {
-      const image = (byte: number): Buffer => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, byte, 10, 1, 10, 2, 10]);
-      const w = setup({ "mine.png": image(1), "theirs.png": image(1) });
+      const w = setup({ "mine.png": bin(1), "theirs.png": bin(1) });
       await w.syncPhone();
-      w.commitThere({ "mine.png": image(2), "theirs.png": image(2) }, "from the computer", at("10:05:00"));
-      w.writePhone("mine.png", image(3), at("10:10:00"));
-      w.writePhone("theirs.png", image(4), at("10:00:00"));
-      const { fs } = withTrash(w);
-      const trashed: Buffer[] = [];
-      const { discard } = fs;
-      fs.discard = async (file) => {
-        trashed.push(readFileSync(path.join(w.phoneDir, file)));
-        await discard!(file);
-      };
+      w.commitThere({ "mine.png": bin(2), "theirs.png": bin(2) }, "from the computer", at("10:05:00"));
+      w.writePhone("mine.png", bin(3), at("10:10:00"));
+      w.writePhone("theirs.png", bin(4), at("10:00:00"));
+      const { fs, trashed } = withTrash(w);
       const result = await w.syncPhone({ fs, onConflict: "later" });
+      const copy = copyOf("theirs.png");
       assert.deepEqual(
         result.later.sort((a, b) => a.path.localeCompare(b.path)),
         [
           { path: "mine.png", kept: "here" },
-          { path: "theirs.png", kept: "there" },
+          { path: "theirs.png", kept: "there", copy },
         ],
       );
-      assert.deepEqual([result.conflicts, result.merged, result.uploaded, result.downloaded], [[], [], ["mine.png"], ["theirs.png"]]);
-      assert.deepEqual(readFileSync(path.join(w.phoneDir, "mine.png")), image(3));
-      assert.deepEqual(readFileSync(path.join(w.phoneDir, "theirs.png")), image(2));
-      assert.deepEqual(trashed, [image(4)]);
-      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "mine.png", "theirs.png"]);
+      assert.deepEqual([result.conflicts, result.merged, result.uploaded.sort(), result.downloaded, trashed], [[{ path: "theirs.png", copy }], [], ["mine.png", copy], ["theirs.png"], {}]);
+      assert.deepEqual([bytes(w.phoneDir, "mine.png"), bytes(w.phoneDir, "theirs.png"), bytes(w.phoneDir, copy)], [bin(3), bin(2), bin(4)]);
+      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "mine.png", copy, "theirs.png"]);
       w.pullPc();
-      assert.deepEqual(readFileSync(path.join(w.pcDir, "mine.png")), image(3));
-      assert.deepEqual(readFileSync(path.join(w.pcDir, "theirs.png")), image(2));
+      assert.deepEqual([bytes(w.pcDir, "mine.png"), bytes(w.pcDir, "theirs.png"), bytes(w.pcDir, copy)], [bin(3), bin(2), bin(4)]);
       assert.equal(server.git(path.basename(w.url), "fsck", "--strict"), "");
+    });
+
+    it("keeps both of two files that the two sides made under one name, whatever the times are, and asks for no time", async () => {
+      const w = setup({ "a.md": "a\n" });
+      await w.syncPhone();
+      // A note of the day and a file with the name that the app gives a new one: made on both sides, and not the same file
+      w.commitThere({ "2026-03-01.md": "the day on the computer\n", "Untitled.png": bin(2) }, "from the computer", at("10:00:00"));
+      w.writePhone("2026-03-01.md", "the day on the phone\n", at("10:05:00"));
+      w.writePhone("Untitled.png", bin(3), at("09:00:00"));
+      const counted = { n: 0 };
+      const asked: string[] = [];
+      const { fs, trashed } = withTrash(w);
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        http: counting(counted),
+        changedAt: (file) => {
+          asked.push(file);
+          return Promise.resolve(at("10:00:00").getTime());
+        },
+      });
+      const copies = [copyOf("2026-03-01.md"), copyOf("Untitled.png")];
+      assert.deepEqual([result.later, result.earlier, trashed, asked, counted.n], [[], [], {}, [], 0]);
+      assert.deepEqual(
+        result.conflicts.sort((a, b) => a.path.localeCompare(b.path)),
+        [
+          { path: "2026-03-01.md", copy: copies[0] },
+          { path: "Untitled.png", copy: copies[1] },
+        ],
+      );
+      assert.deepEqual([w.readPhone("2026-03-01.md"), w.readPhone(copies[0])], ["the day on the computer\n", "the day on the phone\n"]);
+      assert.deepEqual([bytes(w.phoneDir, "Untitled.png"), bytes(w.phoneDir, copies[1])], [bin(2), bin(3)]);
+      w.pullPc();
+      assert.deepEqual([w.readPc("2026-03-01.md"), w.readPc(copies[0])], ["the day on the computer\n", "the day on the phone\n"]);
+    });
+
+    it("keeps both of a file that programs write, whatever the times are, and asks for no time", async () => {
+      const w = setup({ ".obsidian/plugins/icons/data.json": '{"icons":1}\n', "note.md": "start\n" });
+      await w.syncPhone();
+      w.commitThere({ ".obsidian/plugins/icons/data.json": '{"icons":2}\n', "note.md": "the computer's\n" }, "from the computer", at("10:00:00"));
+      // The plugin writes what it has in mind over the file, which gives the file the time of that moment
+      w.writePhone(".obsidian/plugins/icons/data.json", '{"icons":0}\n', at("10:05:00"));
+      w.writePhone("note.md", "the phone's\n", at("10:05:00"));
+      const asked: string[] = [];
+      const { fs, trashed } = withTrash(w);
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        // What the plugin tells the sync of the folder in which Obsidian keeps its settings
+        writtenByPrograms: (file) => file.startsWith(".obsidian/"),
+        changedAt: (file) => {
+          asked.push(file);
+          return Promise.resolve(at("10:00:00").getTime());
+        },
+      });
+      const copy = copyOf(".obsidian/plugins/icons/data.json");
+      assert.equal(copy, ".obsidian/plugins/icons/data (conflict 2026-11-22 0915).json");
+      // The note goes by the times, and the file of the settings does not
+      assert.deepEqual([result.later, result.conflicts, asked, trashed], [[{ path: "note.md", kept: "here" }], [{ path: ".obsidian/plugins/icons/data.json", copy }], ["note.md"], {}]);
+      assert.deepEqual([w.readPhone(".obsidian/plugins/icons/data.json"), w.readPhone(copy), w.readPhone("note.md")], ['{"icons":2}\n', '{"icons":0}\n', "the phone's\n"]);
+    });
+
+    it("keeps both where a time is ahead of the present by more than two minutes", async () => {
+      const w = setup({ "ahead.png": bin(1), "soon.png": bin(1), "theirs.png": bin(1) });
+      await w.syncPhone();
+      w.commitThere({ "ahead.png": bin(2), "soon.png": bin(2) }, "from the computer", at("10:05:00"));
+      w.commitThere({ "theirs.png": bin(2) }, "from a computer whose clock is wrong", new Date(present.getTime() + 3 * 60_000));
+      // A file with a time of years from now would win over every change of the other side until then
+      w.writePhone("ahead.png", bin(3), new Date("2031-01-01T00:00:00Z"));
+      // Two clocks that are a minute apart are two clocks
+      w.writePhone("soon.png", bin(3), new Date(present.getTime() + 60_000));
+      w.writePhone("theirs.png", bin(3), at("10:00:00"));
+      const said: string[] = [];
+      const { fs, trashed } = withTrash(w);
+      const result = await w.syncPhone({ fs, onConflict: "later", log: (message) => said.push(message) });
+      assert.deepEqual(result.later, [{ path: "soon.png", kept: "here" }]);
+      assert.deepEqual(
+        result.conflicts.sort((a, b) => a.path.localeCompare(b.path)),
+        [
+          { path: "ahead.png", copy: copyOf("ahead.png") },
+          { path: "theirs.png", copy: copyOf("theirs.png") },
+        ],
+      );
+      assert.deepEqual(trashed, {});
+      assert.deepEqual([bytes(w.phoneDir, "ahead.png"), bytes(w.phoneDir, copyOf("ahead.png")), bytes(w.phoneDir, "soon.png")], [bin(2), bin(3), bin(3)]);
+      assert.deepEqual([bytes(w.phoneDir, "theirs.png"), bytes(w.phoneDir, copyOf("theirs.png"))], [bin(2), bin(3)]);
+      assert.ok(said.some((line) => line.includes("ahead.png") && line.includes("its time here is ahead of the present")));
+      assert.ok(said.some((line) => line.includes("theirs.png") && line.includes("the time of its commit is ahead of the present")));
     });
 
     it("lets a change win over a removal whatever the times are, and keeps both after what was agreed on was lost", async () => {
@@ -1715,10 +1849,71 @@ describe("sync", () => {
       // Without what was agreed on, a file that differs is not known to have changed on both sides
       writeFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), '{"version":1,"url":"');
       w.writePhone("z.md", "z of the phone\n", at("12:00:00"));
-      const anew = await w.syncPhone({ fs, onConflict: "later" });
-      const copy = "z (conflict 2026-11-22 0915).md";
-      assert.deepEqual([anew.later, anew.conflicts, trashed], [[], [{ path: "z.md", copy }], {}]);
+      const asked: string[] = [];
+      const anew = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        changedAt: (file) => {
+          asked.push(file);
+          return Promise.resolve(at("10:00:00").getTime());
+        },
+      });
+      const copy = copyOf("z.md");
+      assert.deepEqual([anew.later, anew.conflicts, trashed, asked], [[], [{ path: "z.md", copy }], {}, []]);
       assert.deepEqual([w.readPhone("z.md"), w.readPhone(copy)], ["z\n", "z of the phone\n"]);
+    });
+
+    it("says in the plan that a file that both sides changed comes from the remote, also where its times are still to be asked for", async () => {
+      // After what was agreed on was lost, a vault that holds a file otherwise and one of its own is asked about, as a first sync is
+      const w = setup({ "z.md": "z\n" });
+      await w.syncPhone();
+      writeFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), '{"version":1,"url":"');
+      w.writePhone("z.md", "z of the phone\n");
+      w.writePhone("only here.md", "here\n");
+      for (const onConflict of ["both", "later"] as const) {
+        const plans: Plan[] = [];
+        await assert.rejects(
+          w.syncPhone({
+            onConflict,
+            confirm: (plan) => {
+              plans.push(plan);
+              return Promise.resolve(false);
+            },
+          }),
+          CancelledError,
+        );
+        assert.deepEqual(plans, [{ first: true, tracked: 0, take: 1, send: 1, removeHere: [], removeThere: [], replace: [], bothChanged: ["z.md"] }], onConflict);
+      }
+
+      // With what was agreed on: one file comes, whether the times are asked for afterwards or not
+      const v = setup({ "pic.png": bin(1), "text.md": "one\ntwo\n" });
+      await v.syncPhone();
+      v.commitThere({ "pic.png": bin(2), "text.md": "one\nthe computer's two\n" }, "from the computer", at("10:00:00"));
+      v.writePhone("pic.png", bin(3), at("10:05:00"));
+      v.writePhone("text.md", "one\nthe phone's two\n", at("10:05:00"));
+      for (const onConflict of ["both", "later"] as const) {
+        for (const mergeText of [true, false]) {
+          const plans: Plan[] = [];
+          await assert.rejects(
+            v.syncPhone({
+              onConflict,
+              mergeText,
+              confirm: (plan) => {
+                plans.push(plan);
+                return Promise.resolve(false);
+              },
+            }),
+            CancelledError,
+          );
+          // A file that may still be put together is not counted before that was tried, as it never was
+          const take = mergeText ? 0 : 2;
+          assert.deepEqual(
+            plans.map((plan) => ({ ...plan, bothChanged: [...plan.bothChanged].sort() })),
+            [{ first: false, tracked: 2, take, send: 0, removeHere: [], removeThere: [], replace: [], bothChanged: ["pic.png", "text.md"] }],
+            `${onConflict} ${mergeText}`,
+          );
+        }
+      }
     });
 
     it("decides anew when the sync starts over, by the commit that the remote is at then", async () => {
@@ -1739,10 +1934,223 @@ describe("sync", () => {
           return nodeHttp(request);
         },
       });
-      assert.equal(pushes, 1);
-      assert.deepEqual([result.later, result.conflicts, result.uploaded], [[{ path: "note.md", kept: "there" }], [], []]);
-      assert.deepEqual(trashed, { "note.md": "the phone's\n" });
-      assert.equal(w.readPhone("note.md"), "the computer's, once more\n");
+      const copy = copyOf("note.md");
+      assert.equal(pushes, 2);
+      assert.deepEqual([result.later, result.conflicts, result.uploaded, trashed], [[{ path: "note.md", kept: "there", copy }], [{ path: "note.md", copy }], [copy], {}]);
+      assert.deepEqual([w.readPhone("note.md"), w.readPhone(copy)], ["the computer's, once more\n", "the phone's\n"]);
+    });
+
+    it("tells all that it did when the remote turned away a part of what was sent and the sync started over", async () => {
+      const w = setup({ "mine.png": bin(1), "same.png": bin(1), "gone.md": "gone\n" });
+      await w.syncPhone();
+      w.commitThere({ "mine.png": bin(2), "same.png": bin(2) }, "from the computer", at("10:00:00"));
+      w.writePhone("mine.png", bin(3, 3000), at("10:05:00"));
+      w.writePhone("same.png", bin(4, 3000), at("10:00:00"));
+      w.removePhone("gone.md");
+      let pushes = 0;
+      const { fs, trashed } = withTrash(w);
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        http: (request) => {
+          // The first commit of the phone is taken: its later version of a file, and the removal.
+          // Before the second one, another device sends something.
+          if (request.url.endsWith("/git-receive-pack") && ++pushes === 2) {
+            w.commitThere({ "unrelated.md": "x\n" }, "meanwhile", at("10:10:00"));
+          }
+          return nodeHttp(request);
+        },
+      });
+      const copy = copyOf("same.png");
+      assert.equal(pushes, 3);
+      // What the first attempt did is told, although the second one found it done
+      assert.deepEqual(result.later, [{ path: "mine.png", kept: "here" }]);
+      assert.deepEqual(result.deletedThere, ["gone.md"]);
+      assert.deepEqual(result.uploaded.sort(), ["mine.png", copy]);
+      assert.deepEqual([result.conflicts, result.downloaded.sort(), trashed], [[{ path: "same.png", copy }], ["same.png", "unrelated.md"], {}]);
+      assert.deepEqual(w.log(), ["from the phone", "meanwhile", "from the phone", "from the computer", "first"]);
+      w.pullPc();
+      assert.deepEqual([bytes(w.pcDir, "mine.png"), bytes(w.pcDir, "same.png"), bytes(w.pcDir, copy), w.readPc("gone.md")], [bin(3, 3000), bin(2), bin(4, 3000), null]);
+    });
+
+    it("knows a file that a sync wrote before it was cut off, and does not take it for a change of this device", async () => {
+      const all = ["g.png", "h.png", "i.png", "j.png"];
+      const w = setup(Object.fromEntries(all.map((file) => [file, bin(1)])));
+      await w.syncPhone();
+      w.commitThere(Object.fromEntries(all.map((file) => [file, bin(2)])), "computer, first change", at("09:00:00"));
+      // The sync takes the files, and the app is stopped before it notes what was agreed on. Of what it
+      // notes for itself, only what it wrote before it took the first file is on the device.
+      const killed = new NodeFs(w.phoneDir);
+      const write = killed.write.bind(killed);
+      let taking = false;
+      killed.write = async (file, data) => {
+        taking = taking || file.endsWith(".png");
+        if (taking && file.startsWith(".piecemeal/")) {
+          return;
+        }
+        await write(file, data);
+      };
+      const cut = await w.syncPhone({ fs: killed, onConflict: "later" });
+      assert.deepEqual(cut.downloaded.sort(), all);
+      const noted = JSON.parse(readFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), "utf8")) as { tree: Record<string, { oid: string }>; taking?: Record<string, { oid: string }> };
+      assert.deepEqual(Object.keys(noted.taking ?? {}).sort(), all);
+      assert.notEqual(noted.tree["g.png"].oid, noted.taking?.["g.png"].oid);
+      // The files have the time at which the phone took them, which is after the computer made its next change
+      // Two of them were cut off as they were written
+      writeFileSync(path.join(w.phoneDir, "h.png"), bin(2).subarray(0, 7));
+      writeFileSync(path.join(w.phoneDir, "j.png"), bin(2).subarray(0, 6));
+      for (const file of all) {
+        utimesSync(path.join(w.phoneDir, file), at("10:00:00"), at("10:00:00"));
+      }
+      // What the cut-off sync put there whole is no change of the phone to a person who looks, either
+      assert.deepEqual(
+        (await w.changesPhone()).changes.map((change) => change.path),
+        ["h.png", "j.png"],
+      );
+
+      // A commit that was made before the phone took the files, and reaches the server after it
+      w.commitThere({ "g.png": bin(5), "h.png": bin(5) }, "computer, second change", at("09:30:00"));
+      const { fs, trashed } = withTrash(w);
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        // A host that tells the time and nothing of what a file held before, as GitHub
+        changedAt: () => Promise.resolve(at("09:30:00").getTime()),
+      });
+      const copies = [copyOf("h.png"), copyOf("j.png")];
+      // g.png holds what the sync was to write, so it is as the remote had it: the newer version of the remote comes, and no copy is made.
+      // h.png holds something else, and is not gone by its time, although that is the later one: both are kept.
+      // i.png holds what the sync was to write, and the remote left it alone since: it is not sent as a change.
+      // j.png holds something else, and the remote left it alone since: both are kept, and the file that was cut off is the copy.
+      assert.deepEqual([result.later, result.earlier, result.uploaded.sort(), result.downloaded.sort(), trashed], [[], [], copies, ["g.png", "h.png", "j.png"], {}]);
+      assert.deepEqual(
+        result.conflicts.sort((a, b) => a.path.localeCompare(b.path)),
+        [
+          { path: "h.png", copy: copies[0] },
+          { path: "j.png", copy: copies[1] },
+        ],
+      );
+      assert.deepEqual(all.map((file) => bytes(w.phoneDir, file)), [bin(5), bin(5), bin(2), bin(2)]);
+      assert.deepEqual([bytes(w.phoneDir, copies[0]), bytes(w.phoneDir, copies[1])], [bin(2).subarray(0, 7), bin(2).subarray(0, 6)]);
+      assert.equal(server.git(path.basename(w.url), "rev-parse", "main:g.png"), server.git(path.basename(w.url), "rev-parse", "main~1:g.png"));
+      // Nothing is noted as still to be written once a sync came to its end
+      const after = JSON.parse(readFileSync(path.join(w.phoneDir, ".piecemeal/state.json"), "utf8")) as { taking?: unknown };
+      assert.equal(after.taking, undefined);
+      const again = await w.syncPhone({ fs, onConflict: "later" });
+      assert.deepEqual([again.later, again.conflicts, again.downloaded, again.uploaded], [[], [], [], []]);
+    });
+
+    it("takes the version of the remote, with no copy, where the vault holds what the remote held before, as far as the commits tell", async () => {
+      const w = setup({ "pic.png": bin(1), "other.png": bin(1) });
+      await w.syncPhone();
+      w.commitThere({ "pic.png": bin(2), "other.png": bin(2) }, "computer, first change", at("09:00:00"));
+      w.commitThere({ "pic.png": bin(5), "other.png": bin(5) }, "computer, second change", at("09:30:00"));
+      // The phone holds what the first change made of the files, with a time after both changes:
+      // put back from a backup, or written again by a program
+      w.writePhone("pic.png", bin(2), at("11:00:00"));
+      w.writePhone("other.png", bin(2), at("11:00:00"));
+      const { fs, trashed } = withTrash(w);
+      // The commits are asked for one file, where the host does not tell its time. The host tells the time of the other.
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        changedAt: (file) => Promise.resolve(file === "other.png" ? at("09:30:00").getTime() : null),
+      });
+      assert.deepEqual([result.earlier, result.conflicts, result.downloaded, trashed], [["pic.png"], [], ["pic.png"], {}]);
+      assert.deepEqual(bytes(w.phoneDir, "pic.png"), bin(5));
+      // Where the host tells the time by itself, nothing is known of what the file held before, and the time decides:
+      // the old version of the phone is taken for the later one. That is a limit, and the README says so.
+      assert.deepEqual([result.later, result.uploaded], [[{ path: "other.png", kept: "here" }], ["other.png"]]);
+      assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", "other.png", "pic.png"]);
+    });
+
+    it("keeps the version of the vault when the one of the remote is too large to come, and does not send it over that one", async () => {
+      const w = setup({ "big.png": bin(1) });
+      await w.syncPhone();
+      w.commitThere({ "big.png": bin(2, 20_000) }, "from the computer", at("10:05:00"));
+      w.writePhone("big.png", bin(3), at("10:00:00"));
+      const { fs, trashed } = withTrash(w);
+      const copy = copyOf("big.png");
+      const sizeThere = (): string => server.git(path.basename(w.url), "cat-file", "-s", "main:big.png");
+      // A host that cannot give the file in pieces after all
+      for (let n = 0; n < 2; n++) {
+        const result = await w.syncPhone({ fs, onConflict: "later", largeBlob: () => Promise.resolve(false) });
+        assert.deepEqual([result.conflicts, result.later, result.tooLargeThere, result.downloaded, trashed], [[{ path: "big.png", copy }], [{ path: "big.png", kept: "there", copy }], ["big.png"], [], {}], `sync ${n}`);
+        // The copy went to the repository once
+        assert.deepEqual(result.uploaded, n === 0 ? [copy] : []);
+        assert.deepEqual([bytes(w.phoneDir, "big.png"), bytes(w.phoneDir, copy)], [bin(3), bin(3)]);
+        assert.deepEqual(readdirSync(w.phoneDir).sort(), [".piecemeal", copy, "big.png"]);
+        assert.equal(sizeThere(), "20000");
+      }
+      // Once the host gives it, the version of the remote takes the name
+      const last = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        largeBlob: async (_file, to) => {
+          await fs.write(to, bin(2, 20_000));
+          return true;
+        },
+      });
+      assert.deepEqual([last.conflicts, last.downloaded, last.tooLargeThere, last.uploaded, trashed], [[{ path: "big.png", copy }], ["big.png"], [], [], {}]);
+      assert.deepEqual([bytes(w.phoneDir, "big.png"), bytes(w.phoneDir, copy)], [bin(2, 20_000), bin(3)]);
+    });
+
+    it("keeps the version of the vault as a copy when the one of the remote cannot be written", async () => {
+      const w = setup({ "note.png": bin(1) });
+      await w.syncPhone();
+      w.commitThere({ "note.png": bin(2) }, "from the computer", at("10:05:00"));
+      w.writePhone("note.png", bin(3), at("10:00:00"));
+      const { fs, trashed } = withTrash(w);
+      const write = fs.write.bind(fs);
+      let full = true;
+      fs.write = async (file, data) => {
+        if (full && file === "note.png") {
+          throw new Error("disk full");
+        }
+        await write(file, data);
+      };
+      const result = await w.syncPhone({ fs, onConflict: "later" });
+      const copy = copyOf("note.png");
+      assert.deepEqual([result.conflicts, result.busy, result.downloaded, result.uploaded, trashed], [[{ path: "note.png", copy }], ["note.png"], [], [copy], {}]);
+      // What the phone made is in the vault and in the repository, under the name of the copy
+      assert.deepEqual(bytes(w.phoneDir, copy), bin(3));
+      w.pullPc();
+      assert.deepEqual(bytes(w.pcDir, copy), bin(3));
+      full = false;
+      const next = await w.syncPhone({ fs, onConflict: "later" });
+      assert.deepEqual([next.downloaded, next.uploaded, next.conflicts], [["note.png"], [], []]);
+      assert.deepEqual([bytes(w.phoneDir, "note.png"), bytes(w.phoneDir, copy)], [bin(2), bin(3)]);
+    });
+
+    it("leaves a file alone that was changed while the version of the remote was on its way", async () => {
+      const w = setup({ "note.png": bin(1), "zz.png": bin(1) });
+      await w.syncPhone();
+      w.commitThere({ "note.png": bin(2), "zz.png": bin(9) }, "from the computer", at("10:05:00"));
+      w.writePhone("note.png", bin(3), at("10:00:00"));
+      const { fs, trashed } = withTrash(w);
+      let fetches = 0;
+      const result = await w.syncPhone({
+        fs,
+        onConflict: "later",
+        http: (request) => {
+          const body = request.body === undefined ? "" : Buffer.from(request.body).toString("latin1");
+          // The request for what the files hold that are to be taken: no depth, and nothing left out
+          if (request.url.endsWith("/git-upload-pack") && body.includes("command=fetch") && !body.includes("deepen") && !body.includes("filter") && ++fetches === 1) {
+            w.writePhone("note.png", bin(7), at("10:20:00"));
+          }
+          return nodeHttp(request);
+        },
+      });
+      const copy = copyOf("note.png");
+      assert.equal(fetches, 1);
+      // What was written in that moment is still there, and what the sync had looked at is the copy
+      assert.deepEqual([result.busy, result.downloaded, trashed], [["note.png"], ["zz.png"], {}]);
+      assert.deepEqual([bytes(w.phoneDir, "note.png"), bytes(w.phoneDir, copy), bytes(w.phoneDir, "zz.png")], [bin(7), bin(3), bin(9)]);
+      // The next sync deals with it as it is then: it is the later one now
+      const next = await w.syncPhone({ fs, onConflict: "later" });
+      assert.deepEqual([next.later, next.uploaded, next.conflicts, trashed], [[{ path: "note.png", kept: "here" }], ["note.png"], [], {}]);
+      w.pullPc();
+      assert.deepEqual([bytes(w.pcDir, "note.png"), bytes(w.pcDir, copy)], [bin(7), bin(3)]);
     });
   });
 

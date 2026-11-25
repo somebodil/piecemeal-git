@@ -395,16 +395,6 @@ export default class PiecemealGitPlugin extends Plugin {
   }
 
   /**
-   * True if what Obsidian deletes goes into a trash, its own or the one of
-   * the system, and not away for good. That is a setting of Obsidian.
-   */
-  private trashKeeps(): boolean {
-    // Not a part of what Obsidian promises to plugins, so it is asked for with care. Not known counts as no.
-    const option = (this.app.vault as unknown as { getConfig?: (key: string) => unknown }).getConfig?.("trashOption");
-    return option === "system" || option === "local";
-  }
-
-  /**
    * What a sync and a look at the vault are told alike: where the vault and
    * the repository are, who the commits are by, and what is left out.
    */
@@ -428,8 +418,6 @@ export default class PiecemealGitPlugin extends Plugin {
           const file = this.app.vault.getAbstractFileByPath(path);
           return file instanceof TFile ? { size: file.stat.size, mtime: file.stat.mtime } : null;
         },
-        // A file that Obsidian deletes can be had back if it is one that Obsidian puts into a trash, and the settings name one
-        (path) => this.app.vault.getAbstractFileByPath(path) instanceof TFile && this.trashKeeps(),
       ),
     );
     const remote = remoteOf(url, token);
@@ -457,6 +445,8 @@ export default class PiecemealGitPlugin extends Plugin {
         composeNames: Platform.isIosApp || Platform.isMacOS,
         mergeText,
         onConflict,
+        // Obsidian and its plugins write the files of the settings folder, from what they have in mind
+        writtenByPrograms: (path) => path.startsWith(`${configDir}/`),
         changedAt: github === null ? undefined : githubChangedAt(obsidianHttp, github, token),
         maxFileBytes: maxFileMB * MB,
         batchBytes: BATCH_BYTES,
@@ -806,7 +796,8 @@ export default class PiecemealGitPlugin extends Plugin {
       });
       this.rewritten += fs.rewritten;
       this.lastResult = result;
-      if (result.busy.length === 0 && result.tooLargeChanged.length === 0) {
+      // A file that stays as it is because the version of the repository is too large to come can be one that was changed here
+      if (result.busy.length === 0 && result.tooLargeChanged.length === 0 && result.tooLargeThere.length === 0) {
         // All that was changed here is sent, so there is nothing left that differs: known without a look at the vault
         this.changes = [];
         this.looked = true;

@@ -1,6 +1,6 @@
 import { decode, encode } from "./bytes.ts";
 import { type FileStat, type Fs, join } from "./fs.ts";
-import { History } from "./history.ts";
+import { type Change, History } from "./history.ts";
 import { type Http } from "./http.ts";
 import { addToBlock, type Verdict, verdict } from "./ignore.ts";
 import { isText, merge3 } from "./merge.ts";
@@ -66,13 +66,38 @@ export interface SyncOptions {
   mergeText?: boolean;
   /**
    * What becomes of a file that both sides changed and that was not put
-   * together. With "later", the version that was changed later keeps the
-   * name: the time of the file in the vault is held against the time of the
-   * newest commit of the remote that changed the file. With "both", without
-   * it, and where the two times do not tell, the version of the remote takes
+   * together. With "both", and without this, the version of the remote takes
    * the name, and the one of the vault is kept beside it, as a copy.
+   *
+   * With "later", the time of the file in the vault is held against the time
+   * of the newest commit of the remote that changed the file. Where the one
+   * of the vault is the later one, it keeps the name and is sent, and no copy
+   * is made: the version of the remote is in the history of the repository.
+   * Where the one of the remote is the later one, and wherever the two times
+   * are not to be gone by, both are kept as with "both". One more thing can
+   * come of "later": where the commits of the remote were asked for the time,
+   * and tell that the vault holds what the remote held before, the version of
+   * the remote takes the name and no copy is made. The times are not gone by:
+   * - for a file that the two sides have no version of in common: one that
+   *   both made since the last sync, or any file after what was agreed on
+   *   was lost. These may be two files that happen to have one name.
+   * - for a file that `writtenByPrograms` names.
+   * - where a time is not known, where the two are in the same second, and
+   *   where one of them is ahead of the present by more than two minutes,
+   *   which no clock that is right says.
+   * - for a file that a sync that was cut off was about to write, and that
+   *   holds something else than that sync was to put there.
    */
   onConflict?: "later" | "both";
+  /**
+   * True for a file that programs write and no person does, as the files of
+   * the settings folder of the app. The time of such a file says when its
+   * bytes were written, and not how new what it holds is: a program writes
+   * what it has in mind over what a sync brought. So such a file is never
+   * held against the time of a commit, and is dealt with as `onConflict`
+   * "both" says.
+   */
+  writtenByPrograms?: (path: string) => boolean;
   /**
    * When the newest commit that changed a path was made, as its committer
    * says, in milliseconds since 1970, if the host has a way of its own to
@@ -132,9 +157,9 @@ export interface Plan {
   replace: string[];
   /**
    * Files that both sides changed. They are put together where they are
-   * texts and it works out. Else one version takes the name, as `onConflict`
-   * says: the one that was changed later, or the one of the remote, with the
-   * one of the vault kept beside it as a copy.
+   * texts and it works out. Else the version of the remote takes the name,
+   * with the one of the vault kept beside it as a copy, unless `onConflict`
+   * lets the one of the vault keep the name because it was changed later.
    */
   bothChanged: string[];
 }
@@ -155,16 +180,30 @@ export interface SyncResult {
   deletedThere: string[];
   /** Texts that both sides changed in different places. The vault and the remote now hold both changes. */
   merged: string[];
-  /** Files that both sides changed: the version of the remote has the name, and the one of this side is at `copy` */
+  /**
+   * Files that both sides changed and that were not put together, where
+   * both versions are kept: the one of the remote has the name, and the one
+   * of this side is at `copy`. Where the one of the remote could not be put
+   * into the vault, it is also in `busy` or `tooLargeThere`, and the name
+   * still holds the one of this side.
+   */
   conflicts: { path: string; copy: string }[];
   /**
-   * Files that both sides changed, where the version that was changed later
-   * has the name. `kept` is "here" where that is the one of the vault: it
-   * was sent, and the one of the remote is in the history of the repository
-   * only. It is "there" where it is the one of the remote: the one of the
-   * vault went where the app keeps what a person deleted.
+   * Files that both sides changed, where the two times told which version
+   * was changed later. `kept` is "here" where that is the one of the vault:
+   * it keeps the name and was sent, no copy was made, and the one of the
+   * remote is in the history of the repository only. It is "there" where it
+   * is the one of the remote: that file is in `conflicts` as well, and
+   * `copy` is where the one of the vault is kept.
    */
-  later: { path: string; kept: "here" | "there" }[];
+  later: ({ path: string; kept: "here" } | { path: string; kept: "there"; copy: string })[];
+  /**
+   * Files that both sides changed, where the vault held, to the byte, what
+   * the remote held for the file before its newest change. The version of
+   * the remote took the name, and no copy was made: what the vault held is
+   * in the history of the repository.
+   */
+  earlier: string[];
   /** Files that differed at the first sync with the remote. The version of the remote took their place. */
   replaced: string[];
   /**
@@ -211,7 +250,23 @@ interface State {
    * that was cut off goes on as a first sync, and not as one after it.
    */
   joining?: true;
+  /**
+   * What a sync was about to write into the vault, noted before the first
+   * of it was written, and there only while that sync has not come to its
+   * end. A sync that is cut off leaves files with a new time that this
+   * device never changed. The next sync knows them by this: a file that
+   * holds what is noted here is as the remote had it, and no change of
+   * this device.
+   */
+  taking?: Record<string, Entry>;
 }
+
+/**
+ * A time that is this far ahead of the present is not gone by. No clock
+ * that is right says such a time, and a file with a time of next year would
+ * win over every change of the other side until then.
+ */
+const AHEAD_MS = 2 * 60_000;
 
 /**
  * How far apart two changes of a file are at least for its time to differ:
@@ -409,17 +464,21 @@ function conflictPath(path: string, when: Date, taken: (path: string) => boolean
  * The device keeps no commits of its own. Every sync compares three things
  * for each path: what both sides last agreed on, what the vault holds now,
  * and what the remote holds now. What changed on one side goes to the other.
- * Where both changed a file and the two cannot be put together, one version
- * takes the name. If the sync is told so, that is the one that was changed
- * later. Else, and where that cannot be told, the remote is right: its
- * version takes the name, and the one of the vault is kept beside it under
- * another name. At the first sync with a remote, a file that differs is
- * replaced by the one of the remote. The changes of the device then become
- * one commit on top of the remote, so the history of the branch stays a line.
+ * Where both changed a file and the two cannot be put together, both are
+ * kept: the version of the remote takes the name, and the one of the vault
+ * is kept beside it under another name. If the sync is told so, the version
+ * of the vault keeps the name instead where it is the one that was changed
+ * later, and is sent. At the first sync with a remote, a file that differs
+ * is replaced by the one of the remote. The changes of the device then
+ * become one commit on top of the remote, so the history of the branch
+ * stays a line.
  */
 export async function sync(options: SyncOptions): Promise<SyncResult> {
-  /** What an attempt did before the remote refused the rest */
-  const done = { uploaded: [] as string[], tooLargeIgnored: [] as string[] };
+  /**
+   * What the attempts did before the remote refused the rest. The next
+   * attempt finds these things done, and has nothing to tell of them.
+   */
+  const done = emptyResult();
   // Asked once, and not again when the sync starts over
   let confirmed = false;
   const { confirm } = options;
@@ -441,8 +500,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       // Another device sent something while this one was at it. What the remote
       // holds now is looked at again, and the sync goes on from there.
       if (error instanceof RejectedError && attempt < ATTEMPTS) {
-        done.uploaded.push(...result.uploaded);
-        done.tooLargeIgnored.push(...result.tooLargeIgnored);
+        carry(done, result);
         (options.log ?? (() => undefined))(`the branch moved while the sync ran, looking at it again (${error.message})`);
         // Not at once: a server that is still at work on what it was sent a moment ago turns away
         // what comes right after it, and so it does again if it is asked again right away
@@ -451,10 +509,37 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
       }
       throw error;
     }
-    result.uploaded = [...new Set([...done.uploaded, ...result.uploaded])];
-    result.tooLargeIgnored = [...new Set([...done.tooLargeIgnored, ...result.tooLargeIgnored])];
-    return result;
+    carry(done, result);
+    done.commit = result.commit;
+    // What only the last attempt can tell: it took these, and found them so
+    for (const key of ["downloaded", "deletedHere", "replaced", "earlier", "tooLargeChanged", "tooLargeThere", "sameName", "busy"] as const) {
+      done[key] = result[key];
+    }
+    // Not a file of which an earlier attempt said that the version of the vault keeps the name, if
+    // the last attempt took the version of the remote for it after all
+    const taken = new Set([...result.downloaded, ...result.conflicts.map((item) => item.path)]);
+    done.later = done.later.filter((item) => item.kept === "there" || !taken.has(item.path));
+    return done;
   }
+}
+
+/**
+ * Adds what an attempt did to what the attempts before it did. Of a file
+ * that two attempts tell something of, the later one is right.
+ */
+function carry(done: SyncResult, result: SyncResult): void {
+  const paths = (into: string[], from: string[]): string[] => [...new Set([...into, ...from])];
+  const byPath = <T extends { path: string }>(into: T[], from: T[]): T[] => {
+    const again = new Set(from.map((item) => item.path));
+    return [...into.filter((item) => !again.has(item.path)), ...from];
+  };
+  done.uploaded = paths(done.uploaded, result.uploaded);
+  done.deletedThere = paths(done.deletedThere, result.deletedThere);
+  done.merged = paths(done.merged, result.merged);
+  done.tooLargeIgnored = paths(done.tooLargeIgnored, result.tooLargeIgnored);
+  done.conflicts = byPath(done.conflicts, result.conflicts);
+  done.later = byPath(done.later, result.later);
+  done.clashes = byPath(done.clashes, result.clashes);
 }
 
 /** A file of the vault that is not as it was when the vault was last synced. */
@@ -588,6 +673,7 @@ function emptyResult(): SyncResult {
     merged: [],
     conflicts: [],
     later: [],
+    earlier: [],
     replaced: [],
     clashes: [],
     tooLargeIgnored: [],
@@ -799,7 +885,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
   /** True if there was a sync before, and what it agreed on is lost */
   let lost = false;
   /** The file of last time as it is, to see afterwards whether there is anything new to write into it */
-  const savedText = saved === null ? null : decode(saved);
+  let savedText = saved === null ? null : decode(saved);
   if (savedText !== null) {
     let parsed: State | null = null;
     try {
@@ -853,7 +939,9 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     const read = async (path: string): Promise<void> => {
       const before = agreed.get(path)!;
       const data = (await linkAt(path)) ?? (await fs.read(path));
-      if (data !== null && (await objectId({ type: "blob", data })) !== before.oid) {
+      const oid = data === null ? null : await objectId({ type: "blob", data });
+      // What a sync that was cut off put there is how the remote has the file, and no change of this device
+      if (data !== null && oid !== before.oid && oid !== state.taking?.[path]?.oid) {
         changed.set(path, { path, kind: "changed", before, beforeSize: state.stat[path]?.size ?? null, size: data.length });
       }
     };
@@ -1252,11 +1340,55 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     }
   }
 
+  // --- What a sync that was cut off left behind ------------------------------
+  // A sync notes what it is about to write into the vault before it writes
+  // the first of it. If it is stopped before it notes what was agreed on, the
+  // files that it wrote have a new time, and hold something else than was
+  // agreed on: they look like changes of this device, and are none. The next
+  // sync knows them by what was noted. A file that holds, to the byte, what
+  // was to be written is as the remote had it then, and counts as agreed on.
+  /** What a sync is about to write into the vault and has not written yet, by its path */
+  const taking = new Map(Object.entries(state.taking ?? {}));
+  /**
+   * Files that a sync that was cut off was about to write, and that hold
+   * something else, and not what was agreed on either. Such a file may be
+   * one that was cut off as it was written, with the time of that moment.
+   * Its time is not gone by.
+   */
+  const unsure = new Set<string>();
+  /** Files that hold what a sync that was cut off put there */
+  const takenBefore: string[] = [];
+  for (const [path, entry] of taking) {
+    const h = here.get(path);
+    if (h === undefined || !present.has(path) || same(h, base.get(path))) {
+      continue;
+    }
+    // Whether a file may be run is not known here, and a link can be a file that holds where it points: the remote is right
+    if (h.oid === entry.oid && (h.mode === entry.mode || h.mode !== MODE_LINK)) {
+      base.set(path, entry);
+      here.set(path, entry);
+      takenBefore.push(path);
+    } else {
+      unsure.add(path);
+    }
+  }
+  for (const path of takenBefore) {
+    taking.delete(path);
+  }
+  if (takenBefore.length > 0) {
+    log(`${takenBefore.length} file(s) hold what a sync that was cut off put there`);
+  }
+
   // --- Compare, path by path ------------------------------------------------
   const agreed = new Map(base);
   const absent = new Set(Object.keys(state.absent));
   /** The sizes of the files that were left out of the vault for their size */
   const large = new Map(Object.entries(state.large ?? {}));
+  for (const path of takenBefore) {
+    // In the vault now, whatever kept it out before
+    absent.delete(path);
+    large.delete(path);
+  }
   /**
    * Files that an earlier sync left out of the vault, and that this one looks
    * at again: the limit may have been raised since, or the file that had the
@@ -1271,26 +1403,31 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
   const thereCommit = tip;
   const uploads: string[] = [];
   const removeHere: string[] = [];
+  /** Files that are gone from the vault, and that the commit of this sync takes out of the remote */
+  const removeThere: string[] = [];
   const paths = new Set([...base.keys(), ...here.keys(), ...there.keys()]);
   /** Files that both sides changed, and that may be texts that can be put together */
   const bothChanged: { path: string; b: Entry; h: Entry; t: Entry }[] = [];
-  /** Files that both sides changed and that are not put together: one of the two versions takes the name */
+  /**
+   * Files that both sides changed and that are not put together, where the
+   * two times may tell which version keeps the name. They are asked for
+   * after the plan was shown.
+   */
   const unmerged: { path: string; h: Entry; t: Entry }[] = [];
   /** Files that both sides changed, and that the vault holds the later version of. It keeps the name, and is sent. */
   const laterHere = new Set<string>();
-  /**
-   * Files that both sides changed, and that the remote holds the later
-   * version of. It takes the name, and the one of the vault goes where the
-   * app keeps what a person deleted.
-   */
-  const laterThere = new Set<string>();
+  /** Files that both sides changed, where the vault held what the remote held before. The version of the remote takes the name. */
+  const earlier = new Set<string>();
   /** Files that differ at a first sync. The version of the remote takes their place. */
   const replaced = new Set<string>();
   /** Files of the vault that give way to the version of the remote, and go beside it under the name `copy` */
   const aside: { path: string; copy: string; h: Entry }[] = [];
   const copyNames = new Set<string>();
-  /** Gives the name to the version of the remote, and keeps the one of the vault beside it. */
-  const takeTheirs = (path: string, h: Entry, t: Entry): void => {
+  /**
+   * Gives the name to the version of the remote, and keeps the one of the vault beside it.
+   * @returns the name of the copy
+   */
+  const takeTheirs = (path: string, h: Entry, t: Entry): string => {
     // A sync that was cut off may have made the copy of this very version already
     let copy = [...here.keys()].find((other) => isCopyOf(other, path) && here.get(other)!.oid === h.oid);
     if (copy === undefined) {
@@ -1300,6 +1437,28 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     }
     downloads.push({ path, entry: t });
     result.conflicts.push({ path, copy });
+    return copy;
+  };
+  /**
+   * True if the two versions of a file that both sides changed may be held
+   * against each other by their times. Else both are kept, whatever the
+   * times are.
+   */
+  const timesMayTell = (path: string, b: Entry | undefined): boolean =>
+    options.onConflict === "later" &&
+    // Without a version that both sides had, these may be two files that happen to have one name: a
+    // note of the day that two devices made, or any file after what was agreed on was lost
+    b !== undefined &&
+    // The time of such a file says when a program wrote it, and not how new what it holds is
+    options.writtenByPrograms?.(path) !== true &&
+    !unsure.has(path);
+  /** Deals with a file that both sides changed and that is not put together. */
+  const notMerged = (path: string, b: Entry | undefined, h: Entry, t: Entry): void => {
+    if (timesMayTell(path, b)) {
+      unmerged.push({ path, h, t });
+    } else {
+      takeTheirs(path, h, t);
+    }
   };
   /** True if a file is no longer what the scan saw. Such a file is left for the next sync. */
   const changedSinceScan = async (path: string): Promise<boolean> => {
@@ -1362,7 +1521,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     } else if (same(t, b)) {
       if (h === undefined) {
         target.delete(path);
-        result.deletedThere.push(path);
+        removeThere.push(path);
       } else {
         uploads.push(path);
       }
@@ -1388,7 +1547,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     } else if (options.mergeText !== false && b !== undefined && isFile(b) && isFile(h) && isFile(t)) {
       bothChanged.push({ path, b, h, t });
     } else {
-      unmerged.push({ path, h, t });
+      notMerged(path, b, h, t);
     }
   }
 
@@ -1396,12 +1555,14 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     const plan: Plan = {
       first: first || lost,
       tracked: base.size,
-      take: downloads.length,
+      // A file whose times are still to be asked for counts as one that comes: that is what becomes
+      // of it unless the version of the vault turns out to be the later one
+      take: downloads.length + unmerged.length,
       send: uploads.length,
       removeHere: removeHere.filter((path) => !absent.has(path)),
-      removeThere: [...result.deletedThere],
+      removeThere: [...removeThere],
       replace: [...replaced],
-      bothChanged: [...bothChanged.map((item) => item.path), ...unmerged.map((item) => item.path)],
+      bothChanged: [...bothChanged.map((item) => item.path), ...result.conflicts.map((item) => item.path), ...unmerged.map((item) => item.path)],
     };
     if (!(await options.confirm(plan))) {
       throw new CancelledError();
@@ -1412,13 +1573,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
   // As git does it: what the two sides changed in different places of a text
   // is put together, line by line. The device keeps no contents of what was
   // agreed on, so the remote is asked for the text as it was. Where that does
-  // not work out, one of the two versions takes the name.
+  // not work out, the file is dealt with as one that is not a text.
   for (const { path, b, h, t } of bothChanged) {
     const stat = stats.get(path);
     const ours = stat === undefined || stat.size > options.batchBytes ? null : await fs.read(path);
     if (ours === null || !isText(ours)) {
       // Too large for one request, or not a text
-      unmerged.push({ path, h, t });
+      notMerged(path, b, h, t);
       continue;
     }
     if ((await objectId({ type: "blob", data: ours })) !== h.oid) {
@@ -1442,7 +1603,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
       }
     }
     if (both === null) {
-      unmerged.push({ path, h, t });
+      notMerged(path, b, h, t);
       continue;
     }
     const entry: Entry = { oid: await objectId({ type: "blob", data: both }), mode: h.mode !== b.mode ? h.mode : t.mode };
@@ -1475,22 +1636,29 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
   }
 
   // --- A file that both sides changed, and that was not put together ---------
-  // One version takes the name. Where the sync is told so, it is the one that
-  // was changed later: the file of the vault says when it was changed, and
-  // for the remote the newest commit that changed the file does. The version
-  // that gives way is not lost. The one of the remote stays in the history
-  // of the repository, and the one of the vault goes where the app keeps what
-  // a person deleted. Where the app has no such place for the file, or the
-  // times do not tell, the version of the remote takes the name, and the one
-  // of the vault is kept beside it as a copy.
+  // Both versions are kept: the one of the remote takes the name, and the one
+  // of the vault goes beside it as a copy. Where the sync is told to go by
+  // the times, there is one other outcome: the version of the vault was
+  // changed later, so it keeps the name and is sent, and no copy is made. The
+  // one of the remote is then in the history of the repository. The file of
+  // the vault says when it was changed, and for the remote the newest commit
+  // that changed the file does. Wherever the two do not tell, both are kept.
   {
     /** The commits of the remote, asked for when the first file needs them */
     let history: History | null = null;
-    /** Which of the two versions of a file was changed later, or null where the two times do not tell. */
-    const laterOf = async (path: string): Promise<"here" | "there" | null> => {
+    /**
+     * Which of the two versions of a file was changed later, or null where
+     * the two times do not tell. "earlier" where the vault holds what the
+     * remote held before its newest change, which the commits tell where
+     * they were asked for: then the times have nothing to say.
+     */
+    const laterOf = async (path: string, h: Entry): Promise<"here" | "there" | "earlier" | null> => {
       const stat = stats.get(path);
-      // After what was agreed on was lost, a file that differs is not known to have changed on both sides
-      if (options.onConflict !== "later" || lost || thereCommit === null || stat === undefined || !(stat.mtime > 0)) {
+      if (thereCommit === null || stat === undefined || !(stat.mtime > 0)) {
+        return null;
+      }
+      if (stat.mtime > now.getTime() + AHEAD_MS) {
+        log(`${path} was changed on both sides, and its time here is ahead of the present: both are kept`);
         return null;
       }
       let when: number | null = null;
@@ -1501,11 +1669,25 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
         log(`the host did not tell when ${path} was changed (${error instanceof Error ? error.message : String(error)})`);
       }
       if (when === null) {
-        history ??= new History(http, remote, store, thereCommit);
-        when = await history.changedAt(path);
+        let change: Change | null = null;
+        try {
+          history ??= new History(http, remote, store, thereCommit, log);
+          change = await history.lastChange(path);
+        } catch (error) {
+          // Whatever goes wrong with it, the sync goes on: texts were put together and written by now
+          log(`the commits of the remote did not tell when ${path} was changed (${error instanceof Error ? error.message : String(error)})`);
+        }
+        if (change !== null && change.before.includes(h.oid)) {
+          return "earlier";
+        }
+        when = change?.at ?? null;
       }
-      if (when === null) {
-        log(`${path} was changed on both sides, and when the remote changed it is not known`);
+      if (when === null || !Number.isFinite(when)) {
+        log(`${path} was changed on both sides, and when the remote changed it is not known: both are kept`);
+        return null;
+      }
+      if (when > now.getTime() + AHEAD_MS) {
+        log(`${path} was changed on both sides, and the time of its commit is ahead of the present: both are kept`);
         return null;
       }
       // A commit says its time in whole seconds, so the two are held against each other by the second
@@ -1514,15 +1696,19 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
       return mine > theirs ? "here" : mine < theirs ? "there" : null;
     };
     for (const { path, h, t } of unmerged) {
-      const later = await laterOf(path);
-      if (later === "here") {
+      const told = await laterOf(path, h);
+      if (told === "here") {
         laterHere.add(path);
         uploads.push(path);
-      } else if (later === "there" && fs.discard !== undefined && (await fs.keeps?.(path)) === true) {
-        laterThere.add(path);
+      } else if (told === "earlier") {
+        // Nothing of this device is in it: what it holds is in the history of the repository
+        earlier.add(path);
         downloads.push({ path, entry: t });
       } else {
-        takeTheirs(path, h, t);
+        const copy = takeTheirs(path, h, t);
+        if (told === "there") {
+          result.later.push({ path, kept: "there", copy });
+        }
       }
     }
   }
@@ -1550,6 +1736,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
         downloads.splice(planned, 1);
       }
       result.conflicts = result.conflicts.filter((item) => item.path !== path);
+      result.later = result.later.filter((item) => item.path !== path);
       result.busy.push(path);
       continue;
     }
@@ -1655,10 +1842,15 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
     if (first && !ended) {
       next.joining = true;
     }
+    // A sync that came to its end has dealt with every file. Until then, what is still to be written stays noted.
+    if (!ended && taking.size > 0) {
+      next.taking = Object.fromEntries(taking);
+    }
     // A sync that found nothing to do leaves what was agreed on as it is, and the file with it
     const text = JSON.stringify(next);
     if (savedText !== text) {
       await fs.write(statePath, encode(text));
+      savedText = text;
     }
   };
 
@@ -1758,15 +1950,20 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
         stats.set(path, stat);
         seenAs.set(path, entry.oid);
         absent.delete(path);
+        taking.delete(path);
         result.uploaded.push(path);
         if (laterHere.has(path)) {
           result.later.push({ path, kept: "here" });
         }
       }
-      for (const path of result.deletedThere) {
+      // Told once they are gone from the remote, which they are with the first commit that was taken
+      for (const path of removeThere) {
         agreed.delete(path);
         absent.delete(path);
+        taking.delete(path);
+        result.deletedThere.push(path);
       }
+      removeThere.length = 0;
     }
 
     if (sentTree !== null) {
@@ -1808,6 +2005,23 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
       await fs.removeDir(dir);
     }
 
+    // What is about to be written is noted first. If the sync is stopped from here on, the next one
+    // knows the files that this one wrote, although they are not what was agreed on and have a new time.
+    // Not at a first sync, where the remote is right about every file that differs anyway, and not for a
+    // file that an earlier sync left out: that one may stay out again, and then nothing is written.
+    if (!first) {
+      let noted = false;
+      for (const { path, entry } of downloads) {
+        if (inVault(entry) && !again.has(path)) {
+          taking.set(path, entry);
+          noted = true;
+        }
+      }
+      if (noted) {
+        await saveState();
+      }
+    }
+
     if (downloads.length > 0) {
       // Asked for when the first file needs it. A sync that only looks again at files that stay out asks nothing.
       const toTake = [...new Set(downloads.filter(({ entry }) => isFile(entry)).map(({ entry }) => entry.oid))];
@@ -1817,6 +2031,7 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
       /** `tooLarge` is the size of a file that stays out of the vault because of it */
       const settle = (path: string, entry: Entry, isAbsent: boolean, tooLarge?: number): void => {
         agreed.set(path, entry);
+        taking.delete(path);
         if (isAbsent) {
           absent.add(path);
           stats.delete(path);
@@ -1882,12 +2097,10 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
       /**
        * At a first sync, what the vault holds under the name of a file of the
        * remote makes room for it. It goes where the app keeps what a person
-       * deleted, where the app has such a place for it. So does the version
-       * of the vault of a file that both sides changed, when the one of the
-       * remote is the later one.
+       * deleted, where the app has such a place for it.
        */
       const makeRoom = async (path: string): Promise<void> => {
-        if ((replaced.has(path) || laterThere.has(path)) && fs.discard !== undefined && (await fs.stat(path)) !== null) {
+        if (replaced.has(path) && fs.discard !== undefined && (await fs.stat(path)) !== null) {
           await fs.discard(path);
         }
       };
@@ -1897,8 +2110,8 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
         if (replaced.has(path)) {
           result.replaced.push(path);
         }
-        if (laterThere.has(path)) {
-          result.later.push({ path, kept: "there" });
+        if (earlier.has(path)) {
+          result.earlier.push(path);
         }
       };
       let taken = 0;
@@ -1936,7 +2149,13 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
             settle(path, entry, false);
             took(path);
           } else if (result.busy.length === busyBefore) {
-            settle(path, entry, true, size);
+            if ((await fs.stat(path)) === null) {
+              settle(path, entry, true, size);
+            }
+            // Else the vault holds a file under this name that the one of the remote could not take the
+            // place of. It is not left out of the vault, so nothing new is agreed on for it: counted as
+            // left out, it would be taken for a change of this device by the next sync, and sent over
+            // the version of the remote. Both stay as they are, and every sync says so.
             result.tooLargeThere.push(path);
           }
           continue;
@@ -1988,6 +2207,12 @@ async function attemptSync(options: SyncOptions, result: SyncResult, local?: Loc
             tookOne();
             // Another file of this sync may have taken the name under another spelling
             if (await clashes(path, entry)) {
+              continue;
+            }
+            // The answer took its time. A file that is there and was changed while it came holds
+            // something that nothing else holds: it is left as it is, for the next sync.
+            if (stats.has(path) && (await changedSinceScan(path))) {
+              result.busy.push(path);
               continue;
             }
             await makeRoom(path);

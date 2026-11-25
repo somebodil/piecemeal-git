@@ -308,17 +308,22 @@ export class Report {
       this.section(
         "Changed on both sides: yours kept",
         result.later.filter((item) => item.kept === "here").map((item) => item.path),
-        "Your version was changed later, so it keeps the name and was sent. The version of the repository is in the history of the repository.",
+        "Your version was changed later, so it keeps the name and was sent. No copy was made: the version of the repository is in the history of the repository.",
       );
       this.section(
-        "Changed on both sides: the repository's taken",
-        result.later.filter((item) => item.kept === "there").map((item) => item.path),
-        "The version of the repository was changed later, so it has the name now. Yours went where Obsidian puts files that you delete.",
+        "Changed on both sides: the repository's was later",
+        result.later.flatMap((item) => (item.kept === "there" ? [item.copy] : [])),
+        "The version of the repository was changed later, so it has the name now. Yours is kept beside it: these are the copies. Each is in the list above too, where the two can be compared.",
+      );
+      this.section(
+        "Changed on both sides: yours was an earlier version",
+        result.earlier,
+        "What this vault held was, to the byte, what the repository held for the file before. So the version of the repository has the name now, and no copy was made: what this vault held is in the history of the repository.",
       );
       this.section("Removed from this vault", result.deletedHere, "Removed from the repository by another device. They went where Obsidian puts files that you delete.");
       this.section("Removed from the repository", result.deletedThere);
       this.section("Too large to send", [...result.tooLargeIgnored, ...result.tooLargeChanged], "Above the largest size of the settings. They stay in this vault.");
-      this.section("Left out of this vault", [...result.tooLargeThere, ...result.sameName], "Too large to get on this device, or named like another file but for capital letters. They stay in the repository.");
+      this.section("Left out of this vault", [...result.tooLargeThere, ...result.sameName], "Too large to get on this device, or named like another file but for capital letters. They stay in the repository as they are. A file of that name that this vault holds stays as it is too.");
       this.section("Left for the next sync", result.busy, "Changed while the sync ran, or could not be written.");
       if (el.childElementCount === before) {
         el.createEl("p", { text: "Nothing. The vault and the repository held the same files.", cls: "piecemeal-git-note" });

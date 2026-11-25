@@ -62,7 +62,7 @@ export class ConfirmModal extends Modal {
     }
     if (plan.bothChanged.length > 0) {
       row(
-        `${say(plan.bothChanged.length, "was", "were")} changed on both sides. Texts are put together where that works out. Otherwise one version takes the name, as the settings say: the one that was changed later, or the one of the repository, with yours kept beside it as a copy.`,
+        `${say(plan.bothChanged.length, "was", "were")} changed on both sides. Texts are put together where that works out. Otherwise the version of the repository takes the name, with yours kept beside it as a copy. If the settings say so, yours keeps the name instead where it was changed later.`,
         plan.bothChanged,
       );
     }

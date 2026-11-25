@@ -23,9 +23,10 @@ export interface Settings {
   mergeText: boolean;
   /**
    * What becomes of a file that both sides changed and that was not put
-   * together. "later": the version that was changed later keeps the name.
-   * "both": the one of the repository takes the name, and the one of this
-   * device is kept beside it as a copy.
+   * together. "both": the one of the repository takes the name, and the one
+   * of this device is kept beside it as a copy. "later": the same, but the
+   * one of this device keeps the name, with no copy, where it was changed
+   * later than the one of the repository.
    */
   onConflict: "later" | "both";
   /** A sync starts by itself every so many minutes. 0 for never. */

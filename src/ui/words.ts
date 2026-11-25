@@ -69,24 +69,44 @@ export function restart(result: SyncResult, configDir: string): string[] {
   return settings ? ["Settings of Obsidian came with it. Close Obsidian and open it again, so that it reads them."] : [];
 }
 
+/** The name of a file, without the folders that it is in. */
+function nameOf(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
 /** What a sync left for a person to look at. */
 export function concerns(result: SyncResult): string[] {
   const lines: string[] = [];
   const laterHere = result.later.filter((item) => item.kept === "here").map((item) => item.path);
   if (laterHere.length > 0) {
     lines.push(
-      `Changed on both sides, and yours is the later one: ${list(laterHere)}. Yours keeps the name and was sent. The version of the repository is in its history.`,
+      `Changed on both sides, and yours is the later one: ${list(laterHere)}. Yours keeps the name and was sent. No copy was made: the version of the repository is in its history.`,
     );
   }
-  const laterThere = result.later.filter((item) => item.kept === "there").map((item) => item.path);
+  // A version of the repository that did not get into the vault has not taken the name
+  const came = new Set(result.downloaded);
+  const laterThere = result.later.flatMap((item) => (item.kept === "there" && came.has(item.path) ? [item] : []));
   if (laterThere.length > 0) {
     lines.push(
-      `Changed on both sides, and the repository's is the later one: ${list(laterThere)}. The version of the repository has the name now, and yours went where Obsidian puts files that you delete.`,
+      `Changed on both sides, and the repository's is the later one: ${list(laterThere.map((item) => `${item.path} (yours is now ${nameOf(item.copy)})`))}. The version of the repository has the name now, and yours is kept beside it as a copy.`,
     );
   }
-  if (result.conflicts.length > 0) {
+  const told = new Set(laterThere.map((item) => item.path));
+  const both = result.conflicts.filter((item) => came.has(item.path) && !told.has(item.path));
+  if (both.length > 0) {
     lines.push(
-      `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. The version of the repository has the name now, and yours is kept beside it as a copy.`,
+      `Changed on both sides: ${list(both.map((item) => item.path))}. The version of the repository has the name now, and yours is kept beside it as a copy.`,
+    );
+  }
+  const waiting = result.conflicts.filter((item) => !came.has(item.path));
+  if (waiting.length > 0) {
+    lines.push(
+      `Changed on both sides: ${list(waiting.map((item) => item.path))}. Yours is kept as a copy beside it. The version of the repository did not get the name: it could not be put into the vault this time.`,
+    );
+  }
+  if (result.earlier.length > 0) {
+    lines.push(
+      `Changed on both sides, and yours held what the repository held before: ${list(result.earlier)}. The version of the repository has the name now. No copy was made: what yours held is in the history of the repository.`,
     );
   }
   if (result.clashes.length > 0) {
@@ -101,7 +121,7 @@ export function concerns(result: SyncResult): string[] {
     lines.push(`Changed here but now too large to send: ${list(result.tooLargeChanged)}. The repository keeps its version.`);
   }
   if (result.tooLargeThere.length > 0) {
-    lines.push(`Too large to get on this device, and left out of the vault: ${list(result.tooLargeThere)}.`);
+    lines.push(`Too large to get on this device: ${list(result.tooLargeThere)}. The repository keeps its version, and this vault is left without it.`);
   }
   if (result.sameName.length > 0) {
     lines.push(

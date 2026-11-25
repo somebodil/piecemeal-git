@@ -66,8 +66,8 @@ const GROUPS: { heading?: string; rows: Row[] }[] = [
         type: "choice",
         key: "onConflict",
         name: "When both sides changed a file",
-        desc: "For a file that this device and another one both changed, and that was not put together. Take the later one: the version that was changed later keeps the name. The other one is not lost: the one of the repository stays in its history, and yours goes where Obsidian puts files that you delete, or beside the file as a copy where Obsidian has no such place for it. Keep both: the version of the repository has the name, and yours is kept beside it as a copy. Which one is later is told by the clocks of the devices.",
-        choices: { later: "Take the later one", both: "Keep both" },
+        desc: "For a file that this device and another one both changed, and that was not put together. Always keep both: the version of the repository takes the name, and yours is kept beside it as a copy. Keep mine if it is later: the same, but for one case. If yours was changed later than the one of the repository, yours keeps the name and is sent, and no copy is made. The version of the repository is then in the history of the repository only. Which one is later goes by the time at which the file was last written on this device, and by the time at which the other device synced its change. That is not when the file was edited there. So the wrong one can be taken for the later one where a device synced long after a change, where a program wrote a file again, and where a clock is wrong. Both are always kept for the settings of Obsidian and its plugins, for a file that both sides made anew, and where a time is not known or is ahead of the present.",
+        choices: { later: "Keep mine if it is later", both: "Always keep both" },
       },
       {
         type: "number",

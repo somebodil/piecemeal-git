@@ -36,7 +36,7 @@ describe("what the plugin keeps on the device", () => {
     }
   });
 
-  it("takes the later version of a file that both sides changed unless it is told to keep both", () => {
+  it("lets the version of this device keep the name where it is the later one, unless it is told to always keep both", () => {
     assert.equal(DEFAULTS.onConflict, "later");
     assert.equal(readStored({ onConflict: "both" }, null).config.onConflict, "both");
     assert.equal(readStored({ onConflict: "later" }, null).config.onConflict, "later");
