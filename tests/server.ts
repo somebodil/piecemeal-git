@@ -33,6 +33,11 @@ export class TestServer {
     return this.run(dir, args);
   }
 
+  /** Runs git with something for it to read, as `git fast-import` reads the commits that it is to make. */
+  gitWith(input: string | Buffer, dir: string, ...args: string[]): string {
+    return this.run(dir, args, { input });
+  }
+
   private run(dir: string, args: string[], extra: { env?: Record<string, string>; input?: string | Buffer } = {}): string {
     return execFileSync("git", args, {
       cwd: path.join(this.root, dir),
@@ -62,14 +67,17 @@ export class TestServer {
    * This plays a computer that tells "a.md" from "A.md". The disk of most
    * computers does not, so a clone there can neither hold both names nor
    * show git that a name changed its capital letters.
+   *
+   * @param when the moment that the commit says it was made at. Without it, now.
    */
-  commit(name: string, changes: Record<string, string | Buffer | { link: string } | null>, message: string): void {
+  commit(name: string, changes: Record<string, string | Buffer | { link: string } | null>, message: string, when?: Date): void {
     const dir = `${name}.git`;
     const index = path.join(this.root, `${name}.index`);
     rmSync(index, { force: true });
+    const dates: Record<string, string> = when === undefined ? {} : { GIT_AUTHOR_DATE: when.toISOString(), GIT_COMMITTER_DATE: when.toISOString() };
     const git = (args: string[], input?: string | Buffer): string =>
       // Git on a Mac would take the two spellings of a name for one, and put together the letters of a name it is given
-      this.run(dir, ["-c", "core.ignorecase=false", "-c", "core.precomposeunicode=false", ...args], { env: { GIT_INDEX_FILE: index }, input });
+      this.run(dir, ["-c", "core.ignorecase=false", "-c", "core.precomposeunicode=false", ...args], { env: { GIT_INDEX_FILE: index, ...dates }, input });
     let parent: string | null = null;
     try {
       parent = git(["rev-parse", "--verify", "-q", "refs/heads/main"]);

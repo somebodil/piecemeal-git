@@ -135,3 +135,9 @@ export function signature(name: string, email: string, when: Date): string {
   const zone = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}${String(abs % 60).padStart(2, "0")}`;
   return `${name} <${email}> ${seconds} ${zone}`;
 }
+
+/** The moment that such a line of a commit names, in milliseconds since 1970, or null if it names none. */
+export function momentOf(line: string): number | null {
+  const match = / (\d+) [+-]\d{4}$/.exec(line);
+  return match === null ? null : Number(match[1]) * 1000;
+}

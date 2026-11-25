@@ -25,11 +25,23 @@ export class ObsidianFs implements Fs {
   private readonly trash: ((path: string) => Promise<boolean>) | null;
   /** The size and time of a file as Obsidian has them in mind, or null for a file that it keeps no list of */
   private readonly inMind: ((path: string) => FileStat | null) | null;
+  /** True for a file that `trash` puts where a person can get it back */
+  private readonly kept: ((path: string) => boolean) | null;
 
-  constructor(adapter: DataAdapter, trash?: (path: string) => Promise<boolean>, inMind?: (path: string) => FileStat | null) {
+  constructor(
+    adapter: DataAdapter,
+    trash?: (path: string) => Promise<boolean>,
+    inMind?: (path: string) => FileStat | null,
+    kept?: (path: string) => boolean,
+  ) {
     this.adapter = adapter;
     this.trash = trash ?? null;
     this.inMind = inMind ?? null;
+    this.kept = kept ?? null;
+  }
+
+  keeps(path: string): boolean {
+    return this.trash !== null && (this.kept?.(path) ?? false);
   }
 
   quickStat(path: string): FileStat | null {

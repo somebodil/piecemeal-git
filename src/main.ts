@@ -1,6 +1,6 @@
 import { debounce, Notice, Platform, Plugin, setIcon, type TAbstractFile, TFile, type WorkspaceLeaf } from "obsidian";
 import { VerifiedFs } from "./git/fs.ts";
-import { githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
+import { githubChangedAt, githubLargeBlob, githubSizes, parseGitHub } from "./git/github.ts";
 import { parsePack } from "./git/pack.ts";
 import { fetchPack, remoteOf } from "./git/protocol.ts";
 import { CancelledError, type Entry, type LocalChange, localChanges, type Progress, revert, sync, type SyncOptions, type SyncResult } from "./git/sync.ts";
@@ -395,11 +395,21 @@ export default class PiecemealGitPlugin extends Plugin {
   }
 
   /**
+   * True if what Obsidian deletes goes into a trash, its own or the one of
+   * the system, and not away for good. That is a setting of Obsidian.
+   */
+  private trashKeeps(): boolean {
+    // Not a part of what Obsidian promises to plugins, so it is asked for with care. Not known counts as no.
+    const option = (this.app.vault as unknown as { getConfig?: (key: string) => unknown }).getConfig?.("trashOption");
+    return option === "system" || option === "local";
+  }
+
+  /**
    * What a sync and a look at the vault are told alike: where the vault and
    * the repository are, who the commits are by, and what is left out.
    */
   private common(): { fs: VerifiedFs; options: SyncOptions } {
-    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText } = this.config;
+    const { url, branch, tokenSecret, authorName, authorEmail, device, maxFileMB, mergeText, onConflict } = this.config;
     const token = (tokenSecret === "" ? null : this.app.secretStorage.getSecret(tokenSecret)) ?? undefined;
     const fs = new VerifiedFs(
       new ObsidianFs(
@@ -418,6 +428,8 @@ export default class PiecemealGitPlugin extends Plugin {
           const file = this.app.vault.getAbstractFileByPath(path);
           return file instanceof TFile ? { size: file.stat.size, mtime: file.stat.mtime } : null;
         },
+        // A file that Obsidian deletes can be had back if it is one that Obsidian puts into a trash, and the settings name one
+        (path) => this.app.vault.getAbstractFileByPath(path) instanceof TFile && this.trashKeeps(),
       ),
     );
     const remote = remoteOf(url, token);
@@ -444,6 +456,8 @@ export default class PiecemealGitPlugin extends Plugin {
         // An iPhone, an iPad and a Mac keep the letters of a name like "한글.md" in parts
         composeNames: Platform.isIosApp || Platform.isMacOS,
         mergeText,
+        onConflict,
+        changedAt: github === null ? undefined : githubChangedAt(obsidianHttp, github, token),
         maxFileBytes: maxFileMB * MB,
         batchBytes: BATCH_BYTES,
         wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),

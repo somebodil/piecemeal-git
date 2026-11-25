@@ -72,6 +72,18 @@ export function restart(result: SyncResult, configDir: string): string[] {
 /** What a sync left for a person to look at. */
 export function concerns(result: SyncResult): string[] {
   const lines: string[] = [];
+  const laterHere = result.later.filter((item) => item.kept === "here").map((item) => item.path);
+  if (laterHere.length > 0) {
+    lines.push(
+      `Changed on both sides, and yours is the later one: ${list(laterHere)}. Yours keeps the name and was sent. The version of the repository is in its history.`,
+    );
+  }
+  const laterThere = result.later.filter((item) => item.kept === "there").map((item) => item.path);
+  if (laterThere.length > 0) {
+    lines.push(
+      `Changed on both sides, and the repository's is the later one: ${list(laterThere)}. The version of the repository has the name now, and yours went where Obsidian puts files that you delete.`,
+    );
+  }
   if (result.conflicts.length > 0) {
     lines.push(
       `Changed on both sides: ${list(result.conflicts.map((c) => c.path))}. The version of the repository has the name now, and yours is kept beside it as a copy.`,

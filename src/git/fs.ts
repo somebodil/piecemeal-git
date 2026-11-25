@@ -23,6 +23,13 @@ export interface Fs {
    * the file is removed as with `remove`.
    */
   discard?(path: string): Promise<void>;
+  /**
+   * True if `discard` puts this file where a person can get it back, and
+   * does not just remove it. Asked before a file is discarded that nothing
+   * else holds: the version of the vault of a file that both sides changed.
+   * Without this it is not known, and the file is not discarded.
+   */
+  keeps?(path: string): Promise<boolean> | boolean;
   /** Removes a folder if it is empty. Nothing happens if it is not, or if there is none. */
   removeDir(path: string): Promise<void>;
   /** Gives a file another name. The folders above the new name exist. */
@@ -74,10 +81,14 @@ export class VerifiedFs implements Fs {
   readLink?: (path: string) => Promise<string | null>;
   writeLink?: (path: string, target: string) => Promise<void>;
   discard?: (path: string) => Promise<void>;
+  keeps?: (path: string) => Promise<boolean> | boolean;
   quickStat?: (path: string) => Promise<FileStat | null> | FileStat | null;
 
   constructor(inner: Fs) {
     this.inner = inner;
+    if (inner.keeps !== undefined) {
+      this.keeps = (path) => inner.keeps!(path);
+    }
     if (inner.quickStat !== undefined) {
       this.quickStat = (path) => inner.quickStat!(path);
     }

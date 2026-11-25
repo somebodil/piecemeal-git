@@ -36,6 +36,16 @@ describe("what the plugin keeps on the device", () => {
     }
   });
 
+  it("takes the later version of a file that both sides changed unless it is told to keep both", () => {
+    assert.equal(DEFAULTS.onConflict, "later");
+    assert.equal(readStored({ onConflict: "both" }, null).config.onConflict, "both");
+    assert.equal(readStored({ onConflict: "later" }, null).config.onConflict, "later");
+    // Settings that were kept before there was such a setting, and a word that is none of the two
+    assert.equal(readStored({ mergeText: false }, null).config.onConflict, "later");
+    assert.equal(readStored({ onConflict: "newest" }, null).config.onConflict, "later");
+    assert.equal(readStored({ onConflict: true }, null).config.onConflict, "later");
+  });
+
   it("takes only what is a setting, and only of the kind that the setting is", () => {
     const stored = readStored(
       { url: 7, branch: "main", maxFileMB: "20", mergeText: "yes", everyMinutes: Number.NaN, onStart: true, last, more: "than a setting" },

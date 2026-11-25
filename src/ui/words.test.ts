@@ -61,6 +61,7 @@ describe("the words of the plugin", () => {
       deletedThere: [],
       merged: [],
       conflicts: [],
+      later: [],
       replaced: [],
       clashes: [],
       tooLargeIgnored: [],
@@ -71,6 +72,12 @@ describe("the words of the plugin", () => {
       ...over,
     });
     assert.match(concerns(result({ conflicts: [{ path: "a.md", copy: "a (conflict 2026-11-22 0915).md" }] }))[0], /^Changed on both sides: a\.md\. The version of the repository has the name now/);
+    // Where the later version kept the name, it says which one that was and where the other one is
+    const later = concerns(result({ later: [{ path: "a.md", kept: "here" }, { path: "b.md", kept: "there" }, { path: "c.md", kept: "there" }] }));
+    assert.deepEqual(later, [
+      "Changed on both sides, and yours is the later one: a.md. Yours keeps the name and was sent. The version of the repository is in its history.",
+      "Changed on both sides, and the repository's is the later one: b.md, c.md. The version of the repository has the name now, and yours went where Obsidian puts files that you delete.",
+    ]);
     assert.match(concerns(result({ clashes: [{ path: "notes", copy: "notes (conflict 2026-11-22 0915)" }] }))[0], /What is here keeps the name/);
     assert.deepEqual(concerns(result({ replaced: ["a.md"] })), []);
     assert.match(notes(result({ replaced: ["a.md", "b.md"] }))[0], /replaced by its version: a\.md, b\.md\.$/);

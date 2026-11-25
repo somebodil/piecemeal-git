@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import { NodeFs } from "../../tests/node.ts";
-import { githubLargeBlob, parseGitHub } from "./github.ts";
+import { encode } from "./bytes.ts";
+import { githubChangedAt, githubLargeBlob, parseGitHub } from "./github.ts";
 import { type Http } from "./http.ts";
 import { objectId } from "./objects.ts";
 
@@ -44,5 +45,37 @@ describe("githubLargeBlob", () => {
     assert.equal(ok, false);
     assert.equal(await new NodeFs(dir).stat("to/b.bin"), null);
     assert.equal(await new NodeFs(dir).stat("to/b.bin.piecemeal-part"), null);
+  });
+});
+
+describe("githubChangedAt", () => {
+  const where = parseGitHub("https://github.com/someone/vault.git")!;
+  /** A host that answers with `body` as the commits API of GitHub does */
+  const host =
+    (status: number, body: string, seen: { url: string; headers: Record<string, string> }[] = []): Http =>
+    (request) => {
+      seen.push({ url: request.url, headers: request.headers });
+      return Promise.resolve({ status, headers: {}, body: encode(body) });
+    };
+
+  it("asks for the newest commit that changed the path, back from a commit, and reads the time of its committer", async () => {
+    const seen: { url: string; headers: Record<string, string> }[] = [];
+    const answer = JSON.stringify([{ sha: "abc", commit: { author: { date: "2026-03-01T09:00:00Z" }, committer: { date: "2026-03-01T10:00:00Z" } } }]);
+    const when = await githubChangedAt(host(200, answer, seen), where, "secret")("폴더/a note & more.md", "c0ffee");
+    assert.equal(when, Date.parse("2026-03-01T10:00:00Z"));
+    assert.equal(seen.length, 1);
+    assert.equal(
+      seen[0].url,
+      `https://api.github.com/repos/someone/vault/commits?path=${encodeURIComponent("폴더/a note & more.md")}&sha=c0ffee&per_page=1`,
+    );
+    assert.equal(seen[0].headers["Authorization"], "Bearer secret");
+  });
+
+  it("tells no time where GitHub does not answer with a commit", async () => {
+    assert.equal(await githubChangedAt(host(200, "[]"), where, undefined)("a.md", "c0ffee"), null);
+    assert.equal(await githubChangedAt(host(403, '{"message":"API rate limit exceeded"}'), where, undefined)("a.md", "c0ffee"), null);
+    assert.equal(await githubChangedAt(host(200, "<html>"), where, undefined)("a.md", "c0ffee"), null);
+    assert.equal(await githubChangedAt(host(200, '{"message":"no list"}'), where, undefined)("a.md", "c0ffee"), null);
+    assert.equal(await githubChangedAt(host(200, '[{"commit":{"committer":{"date":"then"}}}]'), where, undefined)("a.md", "c0ffee"), null);
   });
 });

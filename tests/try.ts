@@ -70,6 +70,7 @@ console.log(
       deletedThere: result.deletedThere.length,
       merged: result.merged,
       conflicts: result.conflicts,
+      later: result.later,
       tooLargeIgnored: result.tooLargeIgnored,
       tooLargeChanged: result.tooLargeChanged,
       tooLargeThere: result.tooLargeThere,

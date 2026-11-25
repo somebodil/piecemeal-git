@@ -305,6 +305,16 @@ export class Report {
       this.section("Replaced by the version of the repository", result.replaced, "This vault held them otherwise before its first sync. A note that gave way went where Obsidian puts files that you delete.");
       this.section("Sent to the repository", result.uploaded);
       this.section("Put together", result.merged, "Both sides changed different lines of these texts. They hold both changes now.");
+      this.section(
+        "Changed on both sides: yours kept",
+        result.later.filter((item) => item.kept === "here").map((item) => item.path),
+        "Your version was changed later, so it keeps the name and was sent. The version of the repository is in the history of the repository.",
+      );
+      this.section(
+        "Changed on both sides: the repository's taken",
+        result.later.filter((item) => item.kept === "there").map((item) => item.path),
+        "The version of the repository was changed later, so it has the name now. Yours went where Obsidian puts files that you delete.",
+      );
       this.section("Removed from this vault", result.deletedHere, "Removed from the repository by another device. They went where Obsidian puts files that you delete.");
       this.section("Removed from the repository", result.deletedThere);
       this.section("Too large to send", [...result.tooLargeIgnored, ...result.tooLargeChanged], "Above the largest size of the settings. They stay in this vault.");

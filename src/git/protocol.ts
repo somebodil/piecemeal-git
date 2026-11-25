@@ -219,6 +219,8 @@ export interface FetchResult {
   pack: Uint8Array;
   /** Commits that the server sent without their parents */
   shallow: string[];
+  /** Commits that were here without their parents, and whose parents the server sent now */
+  unshallow: string[];
 }
 
 /** Asks for objects and returns the pack that holds them. */
@@ -253,7 +255,7 @@ export async function fetchPack(
   lines.push(pkt("done\n"), FLUSH);
   const body = await uploadPack(http, remote, lines);
 
-  const result: FetchResult = { pack: new Uint8Array(0), shallow: [] };
+  const result: FetchResult = { pack: new Uint8Array(0), shallow: [], unshallow: [] };
   const packParts: Uint8Array[] = [];
   let section = "";
   for (const packet of readPkts(body)) {
@@ -279,6 +281,8 @@ export async function fetchPack(
       section = line;
     } else if (section === "shallow-info" && line.startsWith("shallow ")) {
       result.shallow.push(line.slice("shallow ".length));
+    } else if (section === "shallow-info" && line.startsWith("unshallow ")) {
+      result.unshallow.push(line.slice("unshallow ".length));
     }
   }
   result.pack = concat(packParts);

@@ -21,6 +21,13 @@ export interface Settings {
   maxFileMB: number;
   /** What both sides changed in different places of a text is put together, as git does */
   mergeText: boolean;
+  /**
+   * What becomes of a file that both sides changed and that was not put
+   * together. "later": the version that was changed later keeps the name.
+   * "both": the one of the repository takes the name, and the one of this
+   * device is kept beside it as a copy.
+   */
+  onConflict: "later" | "both";
   /** A sync starts by itself every so many minutes. 0 for never. */
   everyMinutes: number;
   /** A sync starts by itself when Obsidian has opened the vault */
@@ -36,6 +43,7 @@ export const DEFAULTS: Settings = {
   device: "",
   maxFileMB: 20,
   mergeText: true,
+  onConflict: "later",
   everyMinutes: 0,
   onStart: false,
 };
@@ -62,6 +70,9 @@ export interface DeviceState {
 export const SETTINGS_KEY = "piecemeal-git-settings";
 export const STATE_KEY = "piecemeal-git-state";
 
+/** The settings that are one of a few words, with the words that each of them can be */
+export const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = { onConflict: ["later", "both"] };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -71,7 +82,8 @@ function readSettings(kept: Record<string, unknown>): Settings {
   const settings: Record<string, unknown> = { ...DEFAULTS };
   for (const [key, standard] of Object.entries(DEFAULTS)) {
     const value = kept[key];
-    if (typeof value === typeof standard && (typeof value !== "number" || Number.isFinite(value))) {
+    const choices = CHOICES[key as keyof Settings];
+    if (typeof value === typeof standard && (typeof value !== "number" || Number.isFinite(value)) && (choices === undefined || choices.includes(value as string))) {
       settings[key] = value;
     }
   }

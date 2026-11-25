@@ -11,6 +11,8 @@ type Row = { name: string; desc?: string } & (
   | { type: "secret"; key: "tokenSecret" }
   | { type: "number"; key: "maxFileMB" | "everyMinutes"; min: number }
   | { type: "toggle"; key: "onStart" | "mergeText" }
+  /** One of a few: `choices` has what each of them is called, by the word that is kept for it */
+  | { type: "choice"; key: "onConflict"; choices: Record<Settings["onConflict"], string> }
   /** A row that holds none of the settings, and is drawn by the tab */
   | { type: "drawn"; key: "state" | "check" }
 );
@@ -58,7 +60,14 @@ const GROUPS: { heading?: string; rows: Row[] }[] = [
         type: "toggle",
         key: "mergeText",
         name: "Put texts together",
-        desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, the version of the repository has the name and yours is kept beside it as a copy.",
+        desc: "When this device and another one changed different lines of the same text, both changes are kept in it, as git does. Turned off, or when both changed the same lines, one of the two versions takes the name, as the next setting says.",
+      },
+      {
+        type: "choice",
+        key: "onConflict",
+        name: "When both sides changed a file",
+        desc: "For a file that this device and another one both changed, and that was not put together. Take the later one: the version that was changed later keeps the name. The other one is not lost: the one of the repository stays in its history, and yours goes where Obsidian puts files that you delete, or beside the file as a copy where Obsidian has no such place for it. Keep both: the version of the repository has the name, and yours is kept beside it as a copy. Which one is later is told by the clocks of the devices.",
+        choices: { later: "Take the later one", both: "Keep both" },
       },
       {
         type: "number",
@@ -165,6 +174,8 @@ export class SettingsTab extends PluginSettingTab {
         return { name, desc, control: { type: "number", key: row.key, min: row.min } };
       case "toggle":
         return { name, desc, control: { type: "toggle", key: row.key } };
+      case "choice":
+        return { name, desc, control: { type: "dropdown", key: row.key, options: row.choices } };
       case "drawn":
         return {
           name,
@@ -201,6 +212,11 @@ export class SettingsTab extends PluginSettingTab {
       settings[row.key] = value;
     } else if (row.type === "toggle") {
       settings[row.key] = value === true;
+    } else if (row.type === "choice") {
+      if (typeof value !== "string" || !Object.hasOwn(row.choices, value)) {
+        return;
+      }
+      settings[row.key] = value as Settings[typeof row.key];
     } else if (row.key === "url") {
       // The address that a host shows for SSH is taken for the one over HTTPS
       settings.url = typeof value === "string" ? httpsAddress(value) : "";
@@ -237,6 +253,9 @@ export class SettingsTab extends PluginSettingTab {
             break;
           case "toggle":
             setting.addToggle((toggle) => toggle.setValue(settings[row.key]).onChange(change));
+            break;
+          case "choice":
+            setting.addDropdown((dropdown) => dropdown.addOptions(row.choices).setValue(settings[row.key]).onChange(change));
             break;
           case "drawn":
             this.draw(row, setting);

@@ -7,7 +7,8 @@ import { type LargeFile } from "./sync.ts";
 /**
  * What GitHub offers beside the git protocol, and what makes two things
  * possible there that the protocol alone does not: to know the size of a
- * file before asking for it, and to get a large file in pieces.
+ * file before asking for it, and to get a large file in pieces. It also
+ * tells in one answer when a file was last changed, however far back.
  */
 export interface GitHubRepo {
   owner: string;
@@ -72,6 +73,38 @@ export function githubSizes(
       }
     }
     return sizes;
+  };
+}
+
+/**
+ * When the newest commit that changed a path was made, as its committer
+ * says, in milliseconds since 1970. The look goes back from a commit, and
+ * GitHub answers with that one commit, as `git log -1` would for the path.
+ * Null if GitHub does not tell: the sync then asks as git would ask.
+ */
+export function githubChangedAt(
+  http: Http,
+  where: GitHubRepo,
+  token: string | undefined,
+): (path: string, commit: string) => Promise<number | null> {
+  return async (path, commit) => {
+    const response = await http({
+      url: `https://api.github.com/repos/${where.owner}/${where.repo}/commits?path=${encodeURIComponent(path)}&sha=${commit}&per_page=1`,
+      method: "GET",
+      headers: headers(token, { Accept: "application/vnd.github+json" }),
+    });
+    if (response.status !== 200) {
+      return null;
+    }
+    try {
+      const listed = JSON.parse(decode(response.body)) as { commit?: { committer?: { date?: string } } }[];
+      const date = Array.isArray(listed) ? listed[0]?.commit?.committer?.date : undefined;
+      const when = typeof date === "string" ? Date.parse(date) : Number.NaN;
+      return Number.isFinite(when) ? when : null;
+    } catch {
+      // Not what GitHub answers with
+      return null;
+    }
   };
 }
 
